@@ -324,7 +324,7 @@ class NodeSeekDailyMission:
         current_streak = None
         if signin_records:
             description = str(signin_records[0].get("description") or "")
-            match = re.search(r"\u8fde\u7eed\u7b7e\u5230\s*(\d+)\s*\u5929", description)
+            match = re.search(r"连续签到\s*(\d+)\s*天", description)
             if match:
                 current_streak = int(match.group(1))
 
@@ -336,7 +336,7 @@ class NodeSeekDailyMission:
         }
 
     def extract_reward_from_detail(self, detail: str):
-        match = re.search(r"([-+]?\d+(?:\.\d+)?)\s*\u9e21\u817f", detail or "")
+        match = re.search(r"([-+]?\d+(?:\.\d+)?)\s*鸡腿", detail or "")
         if not match:
             return None
         return self.parse_numeric_value(match.group(1))
@@ -434,86 +434,154 @@ class NodeSeekDailyMission:
             except Exception:
                 return {}
 
-    def attendance_with_current_session(self) -> Tuple[bool, str]:
-        headers = {
-            "Accept": "application/json, text/plain, */*",
-            "Content-Type": "application/json",
-            "Origin": NODESEEK_BASE_URL,
-            "Referer": f"{NODESEEK_BASE_URL}/board",
-        }
-        response = self.request_with_fallback(
-            "POST",
-            self.build_attendance_url(),
-            headers=headers,
-            json={},
+    @staticmethod
+    def _wait_for_cloudflare(browser, max_wait: int = 60) -> bool:
+        import time as _time
+        waited = 0
+        while waited < max_wait:
+            title = str(getattr(browser, "title", "") or "").lower()
+            url = str(getattr(browser, "url", "") or "").lower()
+            if "just a moment" not in title and "challenge" not in url:
+                return True
+            _time.sleep(2)
+            waited += 2
+        return False
+
+    # ── Browser-based attendance (DrissionPage + real Chromium) ──────────
+
+    def _attendance_via_browser(self) -> Tuple[bool, str]:
+        try:
+            from DrissionPage import ChromiumOptions, ChromiumPage
+        except ImportError:
+            return False, "DrissionPage not available for browser fallback"
+
+        logger.info(
+            f"NodeSeek using browser for {self.get_account_display_name()}"
         )
-        data = self.parse_json_response(response)
+
+        browser = None
+        try:
+            co = (
+                ChromiumOptions()
+                .auto_port()
+                .headless(False)
+                .incognito(True)
+                .set_argument("--no-sandbox")
+                .set_argument("--disable-blink-features=AutomationControlled")
+                .set_argument("--disable-dev-shm-usage")
+                .set_user_agent(self.session.headers.get("User-Agent", ""))
+            )
+            browser = ChromiumPage(co)
+
+            # Step 1: Navigate homepage with NO cookies — let browser pass CF naturally
+            browser.get(NODESEEK_BASE_URL, timeout=30)
+            if not self._wait_for_cloudflare(browser):
+                return False, "Browser stuck on Cloudflare challenge at homepage"
+            logger.info(
+                f"Browser homepage: title={str(browser.title)[:60]} url={str(browser.url)[:80]}"
+            )
+
+            # Step 2: If we have credentials, always login to get fresh cookies
+            if self.username and self.password:
+                ok, detail = self._browser_login(browser)
+                if not ok:
+                    return False, detail
+                # After login, do attendance
+                browser.get(f"{NODESEEK_BASE_URL}/board", timeout=30)
+                if not self._wait_for_cloudflare(browser):
+                    return False, "Browser stuck on Cloudflare challenge after login"
+                ok, detail = self._browser_fetch_attendance(browser)
+                if ok:
+                    self._save_browser_cookies(browser)
+                    return True, detail
+                return False, f"Login OK but attendance failed: {detail}"
+
+            # Step 3: Cookie-only mode — set cookies AFTER passing CF
+            if self.cookie_str:
+                browser.set.cookies(self.parse_cookie_string(self.cookie_str))
+                browser.get(f"{NODESEEK_BASE_URL}/board", timeout=30)
+                if not self._wait_for_cloudflare(browser):
+                    return False, "Browser stuck on Cloudflare challenge with cookies"
+                ok, detail = self._browser_fetch_attendance(browser)
+                if ok:
+                    self._save_browser_cookies(browser)
+                    return True, detail
+                return False, detail
+
+            return False, "No credentials or cookies configured"
+
+        except Exception as e:
+            return False, f"Browser error: {e}"
+        finally:
+            if browser is not None:
+                try:
+                    browser.quit()
+                except Exception:
+                    pass
+
+    def _browser_fetch_attendance(self, browser) -> Tuple[bool, str]:
+        import json as _json
+
+        random_val = "true" if self.attendance_random else "false"
+        js_code = (
+            "return (async () => {"
+            "  const resp = await fetch('/api/attendance?random=" + random_val + "', {"
+            "    method: 'POST',"
+            "    headers: { 'Content-Type': 'application/json' },"
+            "    body: JSON.stringify({}),"
+            "    credentials: 'include',"
+            "  });"
+            "  const text = await resp.text();"
+            "  return JSON.stringify({ status: resp.status, body: text });"
+            "})();"
+        )
+        result_json = browser.run_js(js_code)
+        if not result_json:
+            return False, "Browser fetch returned no result"
+
+        result = _json.loads(result_json)
+        status_code = result.get("status", 0)
+        body_text = result.get("body", "")
+
+        if status_code != 200:
+            return False, f"Browser attendance HTTP {status_code}: {body_text[:200]}"
+
+        data = _json.loads(body_text) if body_text else {}
         message = str(data.get("message") or data.get("msg") or "").strip()
 
         if data.get("success") is True:
-            return True, message or "Attendance succeeded"
+            return True, message or "Attendance succeeded via browser"
 
-        already_done_markers = [
-            "\u4eca\u65e5\u5df2\u7b7e\u5230",
-            "\u4eca\u65e5\u5df2\u9886\u53d6",
-            "\u4eca\u5929\u5df2\u5b8c\u6210\u7b7e\u5230",
-            "\u8bf7\u52ff\u91cd\u590d\u64cd\u4f5c",
-            "\u5df2\u5b8c\u6210\u7b7e\u5230",
-            "already",
-            "claimed",
+        already_markers = [
+            "今日已签到", "今日已领取", "今天已完成签到",
+            "请勿重复操作", "已完成签到", "already", "claimed",
         ]
-        if any(marker.lower() in message.lower() for marker in already_done_markers):
-            return True, message or "Attendance already completed today"
+        if any(m.lower() in message.lower() for m in already_markers):
+            return True, message or "Attendance already completed"
 
-        invalid_markers = [
-            "\u65e0\u6743\u9650",
-            "\u8bf7\u5148\u767b\u5f55",
-            "\u672a\u767b\u5f55",
-            "\u8ba4\u8bc1",
-            "unauthorized",
-            "forbidden",
-            "cookie",
-            "login",
-            "auth",
-        ]
-        if response.status_code in {401, 403} or any(
-            marker.lower() in message.lower() for marker in invalid_markers
-        ):
-            return False, "cookie_invalid"
+        return False, message or f"Browser attendance failed: {body_text[:200]}"
 
-        if data.get("status") == 404:
-            return False, "cookie_invalid"
-
-        if response.status_code == 200 and not data and response.text:
-            text = response.text[:200].strip()
-            return False, f"Attendance failed with a non-JSON response: {text}"
-
-        return False, message or f"Attendance failed with HTTP {response.status_code}"
-
-    def login_with_yescaptcha(self) -> Tuple[bool, str]:
+    def _browser_login(self, browser) -> Tuple[bool, str]:
         if not self.username or not self.password:
-            return False, "NodeSeek username/password not configured"
-        if self.solver_type != "yescaptcha":
-            return False, "NodeSeek requires SOLVER_TYPE=yescaptcha"
-        if not self.yescaptcha_client_key:
-            return False, "YesCaptcha client key is not configured"
+            return False, "No username/password for browser login"
+        if self.solver_type != "yescaptcha" or not self.yescaptcha_client_key:
+            return False, "YesCaptcha not configured for browser login"
 
-        logger.info("Opening NodeSeek sign-in page...")
-        response = self.request_with_fallback(
-            "GET",
-            NODESEEK_SIGNIN_PAGE_URL,
-            headers={
-                "Accept": (
-                    "text/html,application/xhtml+xml,application/xml;q=0.9,"
-                    "image/avif,image/webp,image/apng,*/*;q=0.8"
-                ),
-                "Referer": NODESEEK_BASE_URL,
-            },
-        )
-        if response.status_code != 200:
-            return False, f"Failed to open NodeSeek sign-in page: HTTP {response.status_code}"
+        import json as _json
+        from captcha_solver import YesCaptchaSolver, YesCaptchaSolverError
 
-        logger.info("Solving NodeSeek Turnstile with YesCaptcha...")
+        # Navigate to sign-in page
+        browser.get(NODESEEK_SIGNIN_PAGE_URL, timeout=30)
+        if not self._wait_for_cloudflare(browser):
+            return False, "Browser stuck on Cloudflare at sign-in page"
+        browser.wait(3)
+
+        # Extract turnstile sitekey from page
+        sitekey = browser.run_js(
+            "return document.querySelector('[data-sitekey]')?.getAttribute('data-sitekey') || ''"
+        ) or NODESEEK_TURNSTILE_SITEKEY
+
+        logger.info(f"Solving NodeSeek Turnstile (sitekey={sitekey}) via YesCaptcha...")
         try:
             solver = YesCaptchaSolver(
                 api_base_url=self.yescaptcha_api_base_url,
@@ -522,127 +590,80 @@ class NodeSeekDailyMission:
             )
             token = solver.solve(
                 url=NODESEEK_SIGNIN_PAGE_URL,
-                sitekey=NODESEEK_TURNSTILE_SITEKEY,
+                sitekey=sitekey,
                 user_agent=self.session.headers.get("User-Agent"),
                 verbose=False,
             )
         except YesCaptchaSolverError as e:
-            return False, f"YesCaptcha failed for NodeSeek: {e}"
+            return False, f"Browser login YesCaptcha failed: {e}"
 
-        payload = {
-            "username": self.username,
-            "password": self.password,
-            "token": token,
-            "source": "turnstile",
-        }
-        headers = {
-            "Accept": "application/json, text/plain, */*",
-            "Content-Type": "application/json;charset=UTF-8",
-            "Origin": NODESEEK_BASE_URL,
-            "Referer": NODESEEK_SIGNIN_PAGE_URL,
-        }
-        response = self.request_with_fallback(
-            "POST",
-            NODESEEK_SIGNIN_API_URL,
-            headers=headers,
-            json=payload,
+        # Submit login via browser JS fetch
+        escaped_username = self.username.replace("\\", "\\\\").replace("'", "\\'")
+        escaped_password = self.password.replace("\\", "\\\\").replace("'", "\\'")
+        escaped_token = token.replace("\\", "\\\\").replace("'", "\\'")
+        js_code = (
+            "return (async () => {"
+            "  const payload = JSON.stringify({"
+            "    username: '" + escaped_username + "',"
+            "    password: '" + escaped_password + "',"
+            "    token: '" + escaped_token + "',"
+            "    source: 'turnstile',"
+            "  });"
+            "  const resp = await fetch('/api/account/signIn', {"
+            "    method: 'POST',"
+            "    headers: { 'Content-Type': 'application/json;charset=UTF-8' },"
+            "    body: payload,"
+            "    credentials: 'include',"
+            "  });"
+            "  const text = await resp.text();"
+            "  return JSON.stringify({ status: resp.status, body: text });"
+            "})();"
         )
-        data = self.parse_json_response(response)
+        result_json = browser.run_js(js_code)
+        if not result_json:
+            return False, "Browser login fetch returned no result"
+
+        result = _json.loads(result_json)
+        body_text = result.get("body", "")
+        data = _json.loads(body_text) if body_text else {}
         message = str(data.get("message") or data.get("msg") or "").strip()
-        if response.status_code != 200:
-            return False, message or f"NodeSeek sign-in failed with HTTP {response.status_code}"
-        if data.get("success") is not True:
-            return False, message or "NodeSeek sign-in did not succeed"
 
-        cookie_str = self.get_cookie_string_from_session()
-        if cookie_str:
-            self.cookie_str = cookie_str
-            self.persist_cookie_if_possible(cookie_str)
-        return True, message or "NodeSeek sign-in succeeded"
+        if result.get("status") != 200 or data.get("success") is not True:
+            return False, message or f"Browser login HTTP {result.get('status')}"
 
-    def get_signin_stats(self) -> Tuple[Optional[int], Optional[int]]:
-        signin_records = [
-            record
-            for record in self.fetch_credit_records()
-            if "\u7b7e\u5230" in str(record.get("description") or "")
-        ]
-        total_signins = len(signin_records) if signin_records else None
-        current_streak = None
-        if signin_records:
-            description = str(signin_records[0].get("description") or "")
-            match = re.search(
-                r"\u8fde\u7eed\u7b7e\u5230\s*(\d+)\s*\u5929",
-                description,
-            )
-            if match:
-                current_streak = int(match.group(1))
-        return total_signins, current_streak
+        logger.success(f"NodeSeek browser login succeeded for {self.get_account_display_name()}")
+        return True, message or "Login succeeded via browser"
 
-    def send_success_notification(self, detail: str) -> None:
-        summary = self.get_credit_summary()
-        today_reward = summary.get("today_reward")
-        if today_reward is None:
-            today_reward = self.extract_reward_from_detail(detail)
-        current_balance = summary.get("current_balance")
-        current_streak = summary.get("current_streak")
-        logger.info(
-            "NodeSeek notification summary: "
-            f"account={self.get_account_display_name()}, "
-            f"today_reward={today_reward}, "
-            f"current_balance={current_balance}, "
-            f"current_streak={current_streak}"
-        )
-        lines = [
-            "✅ NodeSeek daily mission completed",
-            f"Account: {self.get_account_display_name()}",
-            f"Result: {detail}",
-        ]
-        if today_reward is not None:
-            lines.append(f"Today's reward: {self.format_amount(today_reward)} 鸡腿")
-        if current_balance is not None:
-            lines.append(f"Current balance: {self.format_amount(current_balance)} 鸡腿")
-        if current_streak is not None:
-            lines.append(f"Current streak: {current_streak} days")
-        self.notifier.send_all("NodeSeek", "\n".join(lines))
+    def _save_browser_cookies(self, browser) -> None:
+        try:
+            cookie_str = browser.cookies().as_str()
+            if cookie_str and isinstance(cookie_str, str) and cookie_str.strip():
+                self.cookie_str = cookie_str
+                self.sync_session_from_cookie_string(cookie_str)
+                self.persist_cookie_if_possible(cookie_str)
+                logger.info(f"Saved browser cookies for {self.get_account_display_name()}")
+        except Exception as e:
+            logger.warning(f"Failed to save browser cookies: {e}")
 
-    def send_failure_notification(self, detail: str) -> None:
-        lines = [
-            "❌ NodeSeek daily mission failed",
-            f"Account: {self.get_account_display_name()}",
-            f"Reason: {detail}",
-        ]
-        self.notifier.send_all("NodeSeek", "\n".join(lines))
+    # ── Main run ────────────────────────────────────────────────────────
 
     def run(self) -> bool:
         logger.info(
             f"Starting NodeSeek daily mission for {self.get_account_display_name()}..."
         )
 
-        if self.cookie_str:
-            self.sync_session_from_cookie_string(self.cookie_str)
-            ok, detail = self.attendance_with_current_session()
+        if self.cookie_str or (self.username and self.password):
+            ok, detail = self._attendance_via_browser()
             if ok:
-                logger.success(f"NodeSeek attendance succeeded with cookie: {detail}")
+                logger.success(f"NodeSeek attendance succeeded via browser: {detail}")
                 self.send_success_notification(detail)
                 return True
-            if detail != "cookie_invalid":
-                logger.error(f"NodeSeek attendance failed with cookie: {detail}")
-                self.send_failure_notification(detail)
-                return False
-            logger.warning("NodeSeek cookie looks invalid; falling back to username/password")
-
-        ok, detail = self.login_with_yescaptcha()
-        if not ok:
-            logger.error(f"NodeSeek login failed: {detail}")
+            logger.error(f"NodeSeek browser flow failed: {detail}")
             self.send_failure_notification(detail)
             return False
 
-        ok, detail = self.attendance_with_current_session()
-        if ok:
-            logger.success(f"NodeSeek attendance succeeded after sign-in: {detail}")
-            self.send_success_notification(detail)
-            return True
-
-        logger.error(f"NodeSeek attendance failed after sign-in: {detail}")
-        self.send_failure_notification(detail)
+        logger.error(
+            f"NodeSeek: no cookie or username/password configured "
+            f"for {self.get_account_display_name()}"
+        )
         return False
