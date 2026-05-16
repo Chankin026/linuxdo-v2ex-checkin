@@ -356,6 +356,9 @@ class XiaoHeiHeDailyMission:
             for marker in ["签到成功", "已签到", "已经签到", "ignore", "success"]
         ):
             return True, detail
+        if status == "ok":
+            return True, detail
+
         if status == "failed":
             return False, detail
 
