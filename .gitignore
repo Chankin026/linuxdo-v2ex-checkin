@@ -1,0 +1,72 @@
+__pycache__/
+*.py[cod]
+.venv/
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+.env
+.claude/
+.worktrees/
+
+# Vendor binaries
+vendor/heybox-release.apk
+vendor/*.apk
+
+# Unidbg build artifacts and logs
+vendor/unidbg-android/target/
+vendor/unidbg-android/*.log
+
+# Reverse engineering temp files
+analyze_*.py
+compare_*.py
+demo_*.py
+parse_*.py
+resolve_*.py
+trace_*.py
+verify_*.py
+verify_*.sh
+unidbg_signer.py
+xhh_*.py
+xhh_*.js
+xhh_*.md
+tmp_*.js
+test_all_verification.py
+test_signing_chain.py
+test_xhh_complete_algorithm.py
+
+# Analysis docs
+ANALYSIS_SUMMARY.md
+ANTI_FRIDA_GUIDE.md
+COMPLETE_REFERENCE.md
+FILE_INDEX.md
+FINAL_ANALYSIS_REPORT.md
+FINAL_SUMMARY.md
+MAGISK_FRIDA_HIDE_GUIDE.md
+MISSING_COMPONENTS.md
+NATIVE_VERIFICATION_PLAN.md
+NONCE_RANDOMIZATION_ANALYSIS.md
+NONCE_RANDOMIZATION_SUMMARY.md
+QUICK_REFERENCE.md
+README_XHH_ANALYSIS.md
+STATE_MACHINE_TRACE.md
+STATUS_REPORT.md
+VERIFICATION_GUIDE.md
+VERIFICATION_REPORT.md
+XHH_PURE_ALGORITHM_ANALYSIS.md
+XHH_PURE_ALGO_REVERSE_DOC.md
+XIAOHEIHE_PURE_ALGO_REVERSE_DOC.md
+XIAOHEIHE_IMPLEMENTATION_GUIDE.md
+XIAOHEIHE_SIGNIN_ANALYSIS.md
+xhh_native_analysis.md
+xhh_verify_results.json
+
+# Temp unidbg projects
+unidbg-xhh/
+
+# Claude session memory (local only)
+.1code/
+memory/

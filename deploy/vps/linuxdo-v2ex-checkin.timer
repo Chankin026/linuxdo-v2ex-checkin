@@ -1,0 +1,11 @@
+[Unit]
+Description=Run linuxdo-v2ex-checkin twice a day
+
+[Timer]
+OnCalendar=*-*-* 09,21:00:00
+Persistent=true
+RandomizedDelaySec=10m
+Unit=linuxdo-v2ex-checkin.service
+
+[Install]
+WantedBy=timers.target

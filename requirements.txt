@@ -1,0 +1,6 @@
+DrissionPage==4.1.0.18
+tabulate==0.9.0
+loguru==0.7.2
+curl-cffi
+bs4
+cryptography
