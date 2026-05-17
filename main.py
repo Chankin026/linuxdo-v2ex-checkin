@@ -2931,10 +2931,7 @@ def run_configured_tasks() -> None:
     has_v2ex_credentials = bool(V2EX_ENABLED and V2EX_COOKIE)
     nodeseek_accounts = collect_nodeseek_accounts() if NODESEEK_ENABLED else []
     has_nodeseek_credentials = bool(NODESEEK_ENABLED and nodeseek_accounts)
-    has_xiaoheihe_credentials = bool(
-        XIAOHEIHE_ENABLED
-        and XIAOHEIHE_COOKIE
-    )
+    has_xiaoheihe_credentials = bool(XIAOHEIHE_COOKIE)
 
     logger.info(
         "Runtime task summary: "
@@ -3005,7 +3002,7 @@ def run_configured_tasks() -> None:
             retry_max_delay=XIAOHEIHE_RETRY_MAX_DELAY,
             impersonate=XIAOHEIHE_IMPERSONATE,
         ).run()
-    elif XIAOHEIHE_ENABLED:
+    else:
         logger.info("未配置 Xiaoheihe Cookie，跳过小黑盒每日签到")
 
     if has_linuxdo_credentials:
