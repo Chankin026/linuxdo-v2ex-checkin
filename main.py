@@ -2040,16 +2040,31 @@ return new Promise((resolve) => {{
                 )
                 hcaptcha_token = ""
             if hcaptcha_token:
-                # After form submission a new Turnstile often appears alongside
-                # hCaptcha — that Turnstile is the Cloudflare challenge, and XHRs
-                # will get 403 until it is solved too.
                 page_state = self.get_login_page_state()
                 if page_state.get("has_turnstile"):
                     logger.info("检测到新 Turnstile (Cloudflare)，先解决再注册 hCaptcha...")
                     self.solve_turnstile_if_needed()
                     time.sleep(3)
+                # Submit login form with both tokens (Turnstile + hCaptcha)
+                # via real page navigation, which passes Cloudflare unlike XHR.
                 self._wait_for_cloudflare()
-            if hcaptcha_token and not self.prepare_hcaptcha_session(hcaptcha_token, csrf_token):
+                logger.info("通过表单提交登录（绕过 CF 对 XHR 的拦截）...")
+                self.inject_hcaptcha_token(hcaptcha_token)
+                if not self.submit_login_form():
+                    logger.warning("表单提交失败，尝试继续接口登录")
+                else:
+                    time.sleep(8)
+                    if self.validate_login():
+                        cookie_str = self.sync_session_from_browser()
+                        if cookie_str:
+                            logger.info("表单登录成功，已提取新的 Cookie")
+                            self.persist_cookie_if_possible(cookie_str)
+                        else:
+                            logger.warning("表单登录成功，但未能从浏览器提取完整 Cookie")
+                        return True
+                    error_text = self.get_login_error_text()
+                    if error_text:
+                        logger.warning(f"表单登录后页面提示: {error_text[:300]}")
                 if attempt < max_attempts:
                     continue
                 return False
