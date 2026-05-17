@@ -122,6 +122,39 @@ class NodeSeekDailyMission:
     def get_account_display_name(self) -> str:
         return self.account_name or self.username or "unknown"
 
+    def send_success_notification(self, detail: str) -> None:
+        summary = self.get_credit_summary()
+        lines = [
+            "✅ NodeSeek daily attendance completed",
+            f"Account: {self.get_account_display_name()}",
+        ]
+        today_reward = summary.get("today_reward")
+        current_balance = summary.get("current_balance")
+        current_streak = summary.get("current_streak")
+        if today_reward is not None:
+            lines.append(f"Today reward: {today_reward} chicken legs")
+        if current_balance is not None:
+            lines.append(f"Current balance: {current_balance}")
+        if current_streak is not None:
+            lines.append(f"Current streak: {current_streak} days")
+        lines.append(f"Detail: {detail}")
+        logger.info(
+            "NodeSeek notification summary: "
+            f"account={self.get_account_display_name()}, "
+            f"today_reward={today_reward}, "
+            f"current_balance={current_balance}, "
+            f"current_streak={current_streak}"
+        )
+        self.notifier.send_all("NodeSeek", "\n".join(lines))
+
+    def send_failure_notification(self, detail: str) -> None:
+        lines = [
+            "❌ NodeSeek daily attendance failed",
+            f"Account: {self.get_account_display_name()}",
+            f"Reason: {detail}",
+        ]
+        self.notifier.send_all("NodeSeek", "\n".join(lines))
+
     def get_notify_timezone(self) -> str:
         timezone_name = getattr(self.notifier, "notify_timezone", "") or "Asia/Shanghai"
         return timezone_name
