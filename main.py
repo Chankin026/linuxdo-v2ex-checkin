@@ -1271,23 +1271,56 @@ return elements.length > 0;
         real user interaction would — this may bypass Cloudflare where our own
         XHR/fetch gets blocked.
         """
-        # Try the captured native callback first.
-        script = """
+        # ── diagnostic: what does the page know about hCaptcha? ──────────
+        diag_script = """
 (function() {
-    var cb = window.__hcaptchaCallback;
-    if (cb && typeof cb === 'function') {
-        try {
-            cb(arguments[0]);
-            return 'callback_invoked';
-        } catch(e) {
-            return 'callback_error:' + String(e);
-        }
+    var info = {has_hcaptcha: !!window.hcaptcha};
+    if (window.hcaptcha) {
+        info.hcaptcha_type = typeof window.hcaptcha;
+        info.hcaptcha_keys = Object.keys(window.hcaptcha).slice(0, 6);
+        info.has_render = typeof window.hcaptcha.render === 'function';
     }
-    return 'no_callback';
+    info.cb_type = typeof window.__hcaptchaCallback;
+    info.cb_name = window.__hcaptchaCallbackName || null;
+    info.cb_is_fn = typeof window.__hcaptchaCallback === 'function';
+    // also check for hCaptcha iframe on the page
+    var iframe = document.querySelector('iframe[src*=\"hcaptcha\"]');
+    info.has_hcaptcha_iframe = !!iframe;
+    return JSON.stringify(info);
 })();
 """
         try:
-            result = self.page.run_js(script)
+            raw = self.page.run_js(diag_script)
+            if isinstance(raw, str):
+                import json as _json
+                diag = _json.loads(raw)
+                logger.info(
+                    f"hCaptcha 页面诊断: has_hcaptcha={diag.get('has_hcaptcha')} "
+                    f"cb_type={diag.get('cb_type')} "
+                    f"cb_name={diag.get('cb_name')} "
+                    f"has_iframe={diag.get('has_hcaptcha_iframe')} "
+                    f"hcaptcha_keys={diag.get('hcaptcha_keys')}"
+                )
+        except Exception:
+            pass
+
+        # Try the captured native callback first.
+        callback_script = f"""
+(function() {{
+    var cb = window.__hcaptchaCallback;
+    if (cb && typeof cb === 'function') {{
+        try {{
+            cb({json.dumps(token)});
+            return 'callback_invoked';
+        }} catch(e) {{
+            return 'callback_error:' + String(e);
+        }}
+    }}
+    return 'no_callback';
+}})();
+"""
+        try:
+            result = self.page.run_js(callback_script)
             if isinstance(result, str):
                 if result == 'callback_invoked':
                     logger.info("hCaptcha/create 注册成功 (原生 Discourse 回调)")
