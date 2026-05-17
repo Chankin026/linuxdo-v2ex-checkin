@@ -1223,34 +1223,29 @@ return elements.length > 0;
             return False
 
     def _register_hcaptcha_token(self, token: str) -> bool:
-        """Register hCaptcha token via /hcaptcha/create using a new tab form POST.
+        """Register hCaptcha token via /hcaptcha/create using a dedicated tab.
 
         XHR, fetch, iframe form POST, and curl_cffi are all blocked by Cloudflare
-        on this endpoint.  Opening a new tab with a form POST is a real page
-        navigation that triggers CF auto-resolve in the full tab context.
+        on this endpoint.  Creating a dedicated tab and doing a form POST as a
+        real page navigation should trigger CF auto-resolve in the full page context.
         """
         csrf_token = self.fetch_csrf_token()
         if not csrf_token:
             logger.error("hCaptcha 注册缺少 CSRF token")
             return False
 
-        # Remember existing tab IDs so we can find the new one
-        old_ids = set()
+        logger.info("正在通过专用标签页表单提交注册 hCaptcha 验证结果...")
+        hcaptcha_tab = None
         try:
-            for t in self.browser.tabs:
-                try:
-                    old_ids.add(t.tab_id)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+            hcaptcha_tab = self.browser.new_tab()
+            hcaptcha_tab.get("about:blank")
+            time.sleep(1)
 
-        logger.info("正在通过新标签页表单提交注册 hCaptcha 验证结果...")
-        script = f"""
+            # Submit form as a real page navigation in this tab
+            script = f"""
 const form = document.createElement('form');
 form.method = 'POST';
 form.action = {json.dumps(HCAPTCHA_CREATE_URL)};
-form.target = '_blank';
 form.acceptCharset = 'UTF-8';
 const inp1 = document.createElement('input');
 inp1.type = 'hidden';
@@ -1264,84 +1259,67 @@ inp2.value = {json.dumps(csrf_token)};
 form.appendChild(inp2);
 document.body.appendChild(form);
 form.submit();
-document.body.removeChild(form);
 return 'ok';
 """
-        try:
-            raw = self.page.run_js(script)
+            raw = hcaptcha_tab.run_js(script)
             if raw != "ok":
-                logger.warning(f"新标签页表单提交脚本返回异常: {raw}")
+                logger.warning(f"hCaptcha 标签页表单提交脚本返回异常: {raw}")
                 return False
-        except Exception as e:
-            logger.warning(f"新标签页表单提交启动失败: {e}")
-            return False
 
-        # Wait for the new tab to appear and CF to resolve
-        time.sleep(3)
-        hcaptcha_tab = None
-        for _ in range(10):  # poll up to ~30s
-            try:
-                for t in self.browser.tabs:
-                    try:
-                        if t.tab_id not in old_ids:
-                            hcaptcha_tab = t
-                            break
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            if hcaptcha_tab is not None:
-                break
+            # Wait for CF challenge to resolve (real page navigation context)
             time.sleep(3)
-
-        if hcaptcha_tab is None:
-            logger.warning("未找到 hcaptcha/create 新标签页")
-            return False
-
-        # Wait for CF challenge to resolve in the new tab (real page context)
-        waited = 0
-        success = False
-        while waited < 60:
-            try:
-                body_text = hcaptcha_tab.run_js(
-                    "return document.body ? (document.body.innerText || '') : '';"
-                ) or ""
-                if isinstance(body_text, str) and body_text.strip():
-                    lowered = body_text.lower()
-                    if "just a moment" in lowered or (
-                        "challenge" in lowered and "platform" in lowered
-                    ):
-                        time.sleep(3)
-                        waited += 3
-                        continue
-                    try:
-                        result = json.loads(body_text)
-                        if result.get("success"):
-                            logger.info("hCaptcha/create 注册成功 (new-tab POST)")
-                            success = True
-                        else:
+            waited = 3
+            success = False
+            while waited < 90:
+                try:
+                    body_text = hcaptcha_tab.run_js(
+                        "return document.body ? (document.body.innerText || '') : '';"
+                    ) or ""
+                    if isinstance(body_text, str) and body_text.strip():
+                        lowered = body_text.lower()
+                        if "just a moment" in lowered or (
+                            "challenge" in lowered and "platform" in lowered
+                        ):
+                            time.sleep(3)
+                            waited += 3
+                            continue
+                        try:
+                            result = json.loads(body_text)
+                            if result.get("success"):
+                                logger.info("hCaptcha/create 注册成功 (dedicated-tab POST)")
+                                success = True
+                            else:
+                                logger.warning(
+                                    f"hCaptcha/create 返回失败: {body_text[:200]}"
+                                )
+                        except json.JSONDecodeError:
+                            url = ""
+                            try:
+                                url = hcaptcha_tab.url or ""
+                            except Exception:
+                                pass
                             logger.warning(
-                                f"hCaptcha/create 返回失败: {body_text[:200]}"
+                                f"hCaptcha/create 返回非 JSON url={url}: {body_text[:200]}"
                             )
-                    except json.JSONDecodeError:
-                        logger.warning(
-                            f"hCaptcha/create 返回非 JSON: {body_text[:200]}"
-                        )
-                    break
-            except Exception as e:
-                logger.warning(f"读取 hcaptcha/create 标签页异常: {e}")
-            time.sleep(3)
-            waited += 3
+                        break
+                except Exception as e:
+                    logger.warning(f"读取 hcaptcha/create 标签页异常: {e}")
+                time.sleep(3)
+                waited += 3
 
-        try:
-            hcaptcha_tab.close()
-        except Exception:
-            pass
-
-        if not success:
-            logger.error("hCaptcha/create 注册失败")
+            if not success:
+                logger.error(f"hCaptcha/create 注册失败 (waited {waited}s)")
+                return False
+            return True
+        except Exception as e:
+            logger.error(f"hCaptcha/create 专用标签页异常: {e}")
             return False
-        return True
+        finally:
+            if hcaptcha_tab is not None:
+                try:
+                    hcaptcha_tab.close()
+                except Exception:
+                    pass
 
     def solve_hcaptcha_if_needed(self) -> Optional[str]:
         sitekey = self.detect_hcaptcha_sitekey()
