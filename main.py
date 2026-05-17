@@ -1777,28 +1777,84 @@ return '';
             return False
 
         logger.info("正在向站点注册 hCaptcha 验证结果...")
-        resp = self.browser_request(
-            "POST",
+        # Use form-in-iframe POST instead of XHR — Cloudflare blocks XHR/fetch
+        # but allows real page navigations.  The iframe loads the hcaptcha/create
+        # response as a same-origin document so we can read its body.
+        result = self.browser_form_post(
             HCAPTCHA_CREATE_URL,
-            headers={
-                "Accept": "*/*",
-                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                "Discourse-Present": "true",
-                "Origin": "https://linux.do",
-                "Referer": LOGIN_URL,
-                "X-CSRF-Token": csrf_token,
-                "X-Requested-With": "XMLHttpRequest",
-            },
-            body=urlencode({"token": hcaptcha_token}),
+            {"token": hcaptcha_token},
+            csrf_token=csrf_token,
         )
-        if resp.get("status") != 200:
-            logger.error(f"hCaptcha/create 失败: {resp.get('status')}")
-            if resp.get("text"):
-                logger.error(resp["text"][:500])
-            if resp.get("error"):
-                logger.error(resp["error"])
+        status = result.get("status", 0)
+        text = result.get("text", "")
+        if status != 200:
+            logger.error(f"hCaptcha/create 失败: {status}")
+            if text:
+                logger.error(text[:500])
+            if result.get("error"):
+                logger.error(result["error"])
             return False
         return True
+
+    def browser_form_post(self, url: str, fields: dict, csrf_token: str = "") -> dict:
+        """POST via a hidden iframe form — passes Cloudflare unlike XHR."""
+        field_entries = []
+        for name, value in fields.items():
+            field_entries.append(
+                f"  f.appendChild(Object.assign(document.createElement('input'),{{type:'hidden',name:{json.dumps(name)},value:{json.dumps(str(value))}}}));"
+            )
+        field_lines = "\n".join(field_entries)
+        csrf_line = ""
+        if csrf_token:
+            csrf_line = (
+                "f.appendChild(Object.assign(document.createElement('input'),"
+                f"{{type:'hidden',name:'authenticity_token',value:{json.dumps(csrf_token)}}}));"
+            )
+
+        script = f"""
+return new Promise((resolve) => {{
+    const iframe = document.createElement('iframe');
+    iframe.name = 'hcaptcha_iframe_' + Date.now();
+    iframe.style.display = 'none';
+    document.body.appendChild(iframe);
+    const doc = iframe.contentDocument || iframe.contentWindow.document;
+    doc.open();
+    doc.write(
+        '<html><body>'
+        + '<form id=\"f\" action={json.dumps(url)} method=\"POST\" accept-charset=\"UTF-8\">'
+{field_lines}
+{csrf_line}
+        + '</form>'
+        + '</body></html>'
+    );
+    doc.close();
+    const form = doc.getElementById('f');
+    const deadline = Date.now() + 15000;
+    const timer = setInterval(() => {{
+        try {{
+            const bodyText = (iframe.contentDocument || iframe.contentWindow.document).body.innerText || '';
+            if (bodyText) {{
+                clearInterval(timer);
+                document.body.removeChild(iframe);
+                resolve(JSON.stringify({{status: 200, text: bodyText, url: {json.dumps(url)}}}));
+            }}
+        }} catch(e) {{}}
+        if (Date.now() > deadline) {{
+            clearInterval(timer);
+            try {{ document.body.removeChild(iframe); }} catch(e) {{}}
+            resolve(JSON.stringify({{status: 0, error: 'timeout', url: {json.dumps(url)}}}));
+        }}
+    }}, 200);
+    form.submit();
+}});
+"""
+        try:
+            raw = self.page.run_js(script)
+            if isinstance(raw, str):
+                return json.loads(raw)
+        except Exception as e:
+            return {"status": 0, "error": str(e), "url": url}
+        return {"status": 0, "error": "unknown", "url": url}
 
     def browser_request(self, method: str, url: str, headers=None, body=None, page=None) -> dict:
         page = page or self.page
