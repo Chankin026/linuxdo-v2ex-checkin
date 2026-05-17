@@ -1221,52 +1221,54 @@ return elements.length > 0;
             logger.warning(f"注入 hCaptcha token 失败: {e}")
             return False
 
-    def trigger_hcaptcha_callback(self, token: str) -> bool:
-        """Trigger the page's native hCaptcha callback to register token via /hcaptcha/create."""
-        script = f"""
-const token = {json.dumps(token)};
-const textareas = document.querySelectorAll('[name="h-captcha-response"], [name="g-recaptcha-response"]');
-for (const ta of textareas) {{
-  ta.value = token;
-}}
-const hCaptchaDiv = document.querySelector('.h-captcha');
-if (hCaptchaDiv) {{
-  const cb = hCaptchaDiv.getAttribute('data-callback');
-  if (cb && typeof window[cb] === 'function') {{
-    window[cb](token);
-    return JSON.stringify({{ ok: true, via: 'data-callback', name: cb }});
-  }}
-}}
-if (typeof hcaptcha !== 'undefined') {{
-  try {{
-    const nodes = document.querySelectorAll('.h-captcha iframe');
-    for (let i = 0; i < nodes.length; i++) {{
-      try {{
-        hcaptcha.setResponse(i, token);
-        const cb = hcaptcha.getCallback ? hcaptcha.getCallback(i) : null;
-        if (cb) {{ cb(token); return JSON.stringify({{ ok: true, via: 'hcaptcha-api-callback', id: i }}); }}
-      }} catch(e) {{}}
-    }}
-  }} catch(e) {{
-    return JSON.stringify({{ ok: false, error: String(e) }});
-  }}
-}}
-return JSON.stringify({{ ok: false, reason: 'no-callback-found' }});
-"""
+    def _register_hcaptcha_token(self, token: str) -> bool:
+        """Register hCaptcha token via /hcaptcha/create using curl_cffi session.
+
+        The browser's XHR to /hcaptcha/create is blocked by Cloudflare, but
+        curl_cffi with Chrome impersonation and the browser's cookies may pass.
+        """
+        # Transfer browser cookies to curl_cffi session
+        cookie_str = self.get_browser_cookie_string()
+        if cookie_str:
+            self.sync_session_from_cookie_string(cookie_str)
+
+        csrf_token = self.fetch_csrf_token()
+        if not csrf_token:
+            logger.error("hCaptcha 注册缺少 CSRF token")
+            return False
+
+        logger.info("正在通过 curl_cffi 向站点注册 hCaptcha 验证结果...")
         try:
-            raw = self.page.run_js(script)
-            if isinstance(raw, str):
-                result = json.loads(raw)
-                ok = bool(result.get("ok"))
-                if ok:
-                    logger.info(f"已触发原生 hCaptcha 回调 (via {result.get('via')})，等待 /hcaptcha/create 完成...")
-                    time.sleep(4)
-                else:
-                    logger.warning(f"未能触发原生 hCaptcha 回调: {result}")
-                return ok
+            resp = self.session.post(
+                HCAPTCHA_CREATE_URL,
+                data={"token": token},
+                headers={
+                    "Accept": "application/json, text/javascript, */*; q=0.01",
+                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                    "Discourse-Present": "true",
+                    "Origin": "https://linux.do",
+                    "Referer": LOGIN_URL,
+                    "X-CSRF-Token": csrf_token,
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+                impersonate=DEFAULT_IMPERSONATE,
+                timeout=20,
+            )
+            status = resp.status_code
+            text = resp.text or ""
+            if status != 200:
+                logger.error(f"hCaptcha/create 失败: {status}")
+                if text:
+                    snippet = text[:300].replace("\n", " ").strip()
+                    logger.error(snippet)
+                if "just a moment" in text.lower():
+                    logger.error("curl_cffi /hcaptcha/create 被 CF 拦截")
+                return False
+            logger.info(f"hCaptcha/create 成功: status={status}")
+            return True
         except Exception as e:
-            logger.warning(f"触发原生 hCaptcha 回调异常: {e}")
-        return False
+            logger.error(f"hCaptcha/create 异常: {e}")
+            return False
 
     def solve_hcaptcha_if_needed(self) -> Optional[str]:
         sitekey = self.detect_hcaptcha_sitekey()
@@ -2087,10 +2089,11 @@ return new Promise((resolve) => {{
                 )
                 hcaptcha_token = ""
             if hcaptcha_token:
-                # Trigger the page's native hCaptcha callback which internally
-                # calls /hcaptcha/create to register the token server-side.
-                # This bypasses Cloudflare because the page's own JS handles the XHR.
-                self.trigger_hcaptcha_callback(hcaptcha_token)
+                # Register hCaptcha token via curl_cffi /hcaptcha/create.
+                # The browser's XHR is blocked by Cloudflare, but curl_cffi
+                # with Chrome impersonation and browser cookies may pass.
+                if not self._register_hcaptcha_token(hcaptcha_token):
+                    logger.warning("hCaptcha token 注册失败，尝试继续表单登录...")
 
                 page_state = self.get_login_page_state()
                 if page_state.get("has_turnstile"):
