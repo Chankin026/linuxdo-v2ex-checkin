@@ -1812,66 +1812,62 @@ return '';
 
     def browser_form_post(self, url: str, fields: dict, csrf_token: str = "") -> dict:
         """POST via a hidden iframe form — passes Cloudflare unlike XHR."""
-        field_entries = []
+        field_js_parts = []
         for name, value in fields.items():
-            field_entries.append(
-                f"  f.appendChild(Object.assign(document.createElement('input'),{{type:'hidden',name:{json.dumps(name)},value:{json.dumps(str(value))}}}));"
+            field_js_parts.append(
+                "f.appendChild(Object.assign(document.createElement('input'),"
+                f"{{type:'hidden',name:{json.dumps(name)},value:{json.dumps(str(value))}}}));"
             )
-        field_lines = "\n".join(field_entries)
-        csrf_line = ""
         if csrf_token:
-            csrf_line = (
+            field_js_parts.append(
                 "f.appendChild(Object.assign(document.createElement('input'),"
                 f"{{type:'hidden',name:'authenticity_token',value:{json.dumps(csrf_token)}}}));"
             )
+        add_fields_js = "\n".join(field_js_parts)
 
-        script = f"""
-return new Promise((resolve) => {{
-    const iframe = document.createElement('iframe');
-    iframe.name = 'hcaptcha_iframe_' + Date.now();
-    iframe.style.display = 'none';
-    document.body.appendChild(iframe);
-    const doc = iframe.contentDocument || iframe.contentWindow.document;
-    doc.open();
-    doc.write(
-        '<html><body>'
-        + '<form id=\"f\" action={json.dumps(url)} method=\"POST\" accept-charset=\"UTF-8\">'
-{field_lines}
-{csrf_line}
-        + '</form>'
-        + '</body></html>'
-    );
-    doc.close();
-    const form = doc.getElementById('f');
-    const deadline = Date.now() + 15000;
-    const timer = setInterval(() => {{
-        try {{
-            const bodyText = (iframe.contentDocument || iframe.contentWindow.document).body.innerText || '';
-            if (bodyText) {{
-                clearInterval(timer);
-                document.body.removeChild(iframe);
-                const lowered = bodyText.toLowerCase();
-                const blocked = (
-                    lowered.includes('just a moment') ||
-                    lowered.includes('cloudflare') ||
-                    (lowered.includes('challenge') && lowered.includes('platform'))
-                );
-                resolve(JSON.stringify({{
-                    status: blocked ? 403 : 200,
-                    text: bodyText,
-                    url: {json.dumps(url)}
-                }}));
-            }}
-        }} catch(e) {{}}
-        if (Date.now() > deadline) {{
-            clearInterval(timer);
-            try {{ document.body.removeChild(iframe); }} catch(e) {{}}
-            resolve(JSON.stringify({{status: 0, error: 'timeout', url: {json.dumps(url)}}}));
-        }}
-    }}, 200);
-    form.submit();
-}});
-"""
+        script = (
+            "return new Promise((resolve) => {\n"
+            "    const iframe = document.createElement('iframe');\n"
+            "    iframe.style.display = 'none';\n"
+            "    document.body.appendChild(iframe);\n"
+            "    const doc = iframe.contentDocument || iframe.contentWindow.document;\n"
+            "    doc.open();\n"
+            "    doc.write('<html><body><form id=\"f\" action="
+            + json.dumps(url)
+            + " method=\"POST\"></form></body></html>');\n"
+            "    doc.close();\n"
+            "    const f = doc.getElementById('f');\n"
+            + add_fields_js
+            + "\n"
+            "    const deadline = Date.now() + 15000;\n"
+            "    const timer = setInterval(() => {\n"
+            "        try {\n"
+            "            const bodyText = (iframe.contentDocument || iframe.contentWindow.document).body.innerText || '';\n"
+            "            if (bodyText) {\n"
+            "                clearInterval(timer);\n"
+            "                document.body.removeChild(iframe);\n"
+            "                const lowered = bodyText.toLowerCase();\n"
+            "                const blocked = (\n"
+            "                    lowered.includes('just a moment') ||\n"
+            "                    lowered.includes('cloudflare') ||\n"
+            "                    (lowered.includes('challenge') && lowered.includes('platform'))\n"
+            "                );\n"
+            "                resolve(JSON.stringify({status: blocked ? 403 : 200, text: bodyText, url: "
+            + json.dumps(url)
+            + "}));\n"
+            "            }\n"
+            "        } catch(e) {}\n"
+            "        if (Date.now() > deadline) {\n"
+            "            clearInterval(timer);\n"
+            "            try { document.body.removeChild(iframe); } catch(e) {}\n"
+            "            resolve(JSON.stringify({status: 0, error: 'timeout', url: "
+            + json.dumps(url)
+            + "}));\n"
+            "        }\n"
+            "    }, 200);\n"
+            "    f.submit();\n"
+            "});"
+        )
         try:
             raw = self.page.run_js(script)
             if isinstance(raw, str):
