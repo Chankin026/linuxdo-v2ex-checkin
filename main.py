@@ -1951,6 +1951,16 @@ return new Promise((resolve) => {{
                     "hCaptcha 解决失败，降级尝试不带 hCaptcha token 提交登录..."
                 )
                 hcaptcha_token = ""
+            if hcaptcha_token:
+                # After form submission a new Turnstile often appears alongside
+                # hCaptcha — that Turnstile is the Cloudflare challenge, and XHRs
+                # will get 403 until it is solved too.
+                page_state = self.get_login_page_state()
+                if page_state.get("has_turnstile"):
+                    logger.info("检测到新 Turnstile (Cloudflare)，先解决再注册 hCaptcha...")
+                    self.solve_turnstile_if_needed()
+                    time.sleep(3)
+                self._wait_for_cloudflare()
             if hcaptcha_token and not self.prepare_hcaptcha_session(hcaptcha_token, csrf_token):
                 if attempt < max_attempts:
                     continue
