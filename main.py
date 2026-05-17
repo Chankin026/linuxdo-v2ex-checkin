@@ -1223,103 +1223,43 @@ return elements.length > 0;
             return False
 
     def _register_hcaptcha_token(self, token: str) -> bool:
-        """Register hCaptcha token via /hcaptcha/create using a dedicated tab.
+        """Register hCaptcha token via /hcaptcha/create using browser XHR.
 
-        XHR, fetch, iframe form POST, and curl_cffi are all blocked by Cloudflare
-        on this endpoint.  Creating a dedicated tab and doing a form POST as a
-        real page navigation should trigger CF auto-resolve in the full page context.
+        Must be called AFTER a fresh Turnstile is solved, so the browser has
+        a valid cf_clearance for the /hcaptcha/create endpoint.
         """
         csrf_token = self.fetch_csrf_token()
         if not csrf_token:
             logger.error("hCaptcha 注册缺少 CSRF token")
             return False
 
-        logger.info("正在通过专用标签页表单提交注册 hCaptcha 验证结果...")
-        hcaptcha_tab = None
-        try:
-            hcaptcha_tab = self.browser.new_tab()
-            hcaptcha_tab.get("about:blank")
-            time.sleep(1)
-
-            # Submit form as a real page navigation in this tab
-            script = f"""
-const form = document.createElement('form');
-form.method = 'POST';
-form.action = {json.dumps(HCAPTCHA_CREATE_URL)};
-form.acceptCharset = 'UTF-8';
-const inp1 = document.createElement('input');
-inp1.type = 'hidden';
-inp1.name = 'token';
-inp1.value = {json.dumps(token)};
-form.appendChild(inp1);
-const inp2 = document.createElement('input');
-inp2.type = 'hidden';
-inp2.name = 'authenticity_token';
-inp2.value = {json.dumps(csrf_token)};
-form.appendChild(inp2);
-document.body.appendChild(form);
-form.submit();
-return 'ok';
-"""
-            raw = hcaptcha_tab.run_js(script)
-            if raw != "ok":
-                logger.warning(f"hCaptcha 标签页表单提交脚本返回异常: {raw}")
-                return False
-
-            # Wait for CF challenge to resolve (real page navigation context)
-            time.sleep(3)
-            waited = 3
-            success = False
-            while waited < 90:
-                try:
-                    body_text = hcaptcha_tab.run_js(
-                        "return document.body ? (document.body.innerText || '') : '';"
-                    ) or ""
-                    if isinstance(body_text, str) and body_text.strip():
-                        lowered = body_text.lower()
-                        if "just a moment" in lowered or (
-                            "challenge" in lowered and "platform" in lowered
-                        ):
-                            time.sleep(3)
-                            waited += 3
-                            continue
-                        try:
-                            result = json.loads(body_text)
-                            if result.get("success"):
-                                logger.info("hCaptcha/create 注册成功 (dedicated-tab POST)")
-                                success = True
-                            else:
-                                logger.warning(
-                                    f"hCaptcha/create 返回失败: {body_text[:200]}"
-                                )
-                        except json.JSONDecodeError:
-                            url = ""
-                            try:
-                                url = hcaptcha_tab.url or ""
-                            except Exception:
-                                pass
-                            logger.warning(
-                                f"hCaptcha/create 返回非 JSON url={url}: {body_text[:200]}"
-                            )
-                        break
-                except Exception as e:
-                    logger.warning(f"读取 hcaptcha/create 标签页异常: {e}")
-                time.sleep(3)
-                waited += 3
-
-            if not success:
-                logger.error(f"hCaptcha/create 注册失败 (waited {waited}s)")
-                return False
-            return True
-        except Exception as e:
-            logger.error(f"hCaptcha/create 专用标签页异常: {e}")
+        logger.info("正在通过浏览器 XHR 注册 hCaptcha 验证结果...")
+        result = self.browser_request(
+            "POST",
+            HCAPTCHA_CREATE_URL,
+            headers={
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "Discourse-Present": "true",
+                "Origin": "https://linux.do",
+                "Referer": LOGIN_URL,
+                "X-CSRF-Token": csrf_token,
+                "X-Requested-With": "XMLHttpRequest",
+            },
+            body=urlencode({"token": token}),
+        )
+        status = result.get("status", 0)
+        text = result.get("text", "")
+        if status != 200:
+            logger.error(f"hCaptcha/create 失败: status={status}")
+            if text:
+                snippet = text[:300].replace("\n", " ").strip()
+                logger.error(snippet)
+            if "just a moment" in text.lower():
+                logger.error("浏览器 XHR /hcaptcha/create 被 CF 拦截")
             return False
-        finally:
-            if hcaptcha_tab is not None:
-                try:
-                    hcaptcha_tab.close()
-                except Exception:
-                    pass
+        logger.info("hCaptcha/create 注册成功 (browser XHR)")
+        return True
 
     def solve_hcaptcha_if_needed(self) -> Optional[str]:
         sitekey = self.detect_hcaptcha_sitekey()
@@ -2140,17 +2080,19 @@ return new Promise((resolve) => {{
                 )
                 hcaptcha_token = ""
             if hcaptcha_token:
-                # Register hCaptcha token via curl_cffi /hcaptcha/create.
-                # The browser's XHR is blocked by Cloudflare, but curl_cffi
-                # with Chrome impersonation and browser cookies may pass.
-                if not self._register_hcaptcha_token(hcaptcha_token):
-                    logger.warning("hCaptcha token 注册失败，尝试继续表单登录...")
-
+                # A new Turnstile appears when hCaptcha is triggered.  Solve it
+                # FIRST to get a fresh cf_clearance before calling /hcaptcha/create.
                 page_state = self.get_login_page_state()
                 if page_state.get("has_turnstile"):
-                    logger.info("检测到新 Turnstile (Cloudflare)，先解决再提交登录...")
+                    logger.info("检测到新 Turnstile (Cloudflare)，先解决以获取新鲜 cf_clearance...")
                     self.solve_turnstile_if_needed()
                     time.sleep(3)
+
+                # Register hCaptcha token via dedicated tab form POST.
+                # All XHR/fetch/curl_cffi approaches are blocked by Cloudflare.
+                # The fresh cf_clearance from the Turnstile solve above may help.
+                if not self._register_hcaptcha_token(hcaptcha_token):
+                    logger.warning("hCaptcha token 注册失败，尝试继续表单登录...")
 
                 self._wait_for_cloudflare()
                 logger.info("通过浏览器表单提交登录...")
