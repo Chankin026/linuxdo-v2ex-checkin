@@ -728,6 +728,7 @@ class LinuxDoBrowser:
             .headless(HEADLESS_MODE)
             .incognito(True)
             .set_argument("--no-sandbox")
+            .set_argument("--disable-blink-features=AutomationControlled")
         )
         if FORCE_IPV4:
             co.set_argument("--disable-ipv6")
@@ -832,6 +833,19 @@ class LinuxDoBrowser:
         self.notifier = old_notifier
         self.login_name = old_login_name
         self.login_method = old_login_method
+
+    def _wait_for_cloudflare(self, max_wait: int = 60) -> bool:
+        waited = 0
+        while waited < max_wait:
+            title = str(getattr(self.page, "title", "") or "").lower()
+            url = str(getattr(self.page, "url", "") or "").lower()
+            if "just a moment" not in title and "challenge" not in url:
+                return True
+            time.sleep(2)
+            waited += 2
+        title = str(getattr(self.page, "title", "") or "").lower()
+        url = str(getattr(self.page, "url", "") or "").lower()
+        return "just a moment" not in title and "challenge" not in url
 
     def sync_session_from_cookie_string(self, cookie_str: str) -> None:
         for ck in self.parse_cookie_string(cookie_str):
@@ -1836,7 +1850,17 @@ return new Promise((resolve) => {{
             if (bodyText) {{
                 clearInterval(timer);
                 document.body.removeChild(iframe);
-                resolve(JSON.stringify({{status: 200, text: bodyText, url: {json.dumps(url)}}}));
+                const lowered = bodyText.toLowerCase();
+                const blocked = (
+                    lowered.includes('just a moment') ||
+                    lowered.includes('cloudflare') ||
+                    (lowered.includes('challenge') && lowered.includes('platform'))
+                );
+                resolve(JSON.stringify({{
+                    status: blocked ? 403 : 200,
+                    text: bodyText,
+                    url: {json.dumps(url)}
+                }}));
             }}
         }} catch(e) {{}}
         if (Date.now() > deadline) {{
@@ -1918,6 +1942,8 @@ return new Promise((resolve) => {{
             logger.info("打开登录页，准备在浏览器上下文中登录...")
             self.page.get(LOGIN_URL)
             time.sleep(5)
+            if not self._wait_for_cloudflare():
+                logger.warning("登录页可能被 Cloudflare 拦截，继续尝试")
             return True
         except Exception as e:
             logger.error(f"打开登录页失败: {e}")
@@ -2022,6 +2048,7 @@ return new Promise((resolve) => {{
                     continue
                 return False
 
+            self._wait_for_cloudflare()
             logger.info("正在提交登录请求...")
             payload_data = {
                 "login": USERNAME,
@@ -2158,9 +2185,28 @@ return new Promise((resolve) => {{
 
     def login_with_cookies(self, cookie_str: str) -> bool:
         logger.info("检测到手动 Cookie，尝试 Cookie 登录...")
+
+        # Navigate clean first to pass Cloudflare, same as NodeSeek fix
+        try:
+            self.page.get(HOME_URL)
+            time.sleep(5)
+        except Exception as e:
+            logger.warning(f"Cookie 登录前打开首页失败: {e}")
+        if not self._wait_for_cloudflare():
+            logger.warning("Cookie 登录前首页仍被 Cloudflare 拦截，继续尝试")
+
         if not self.sync_browser_from_cookie_string(cookie_str):
             logger.error("Cookie 解析失败或为空，无法使用 Cookie 登录")
             return False
+
+        # Re-navigate after setting cookies — stale cf_clearance may trigger
+        # another challenge; let the browser pass it before validating
+        try:
+            self.page.get(HOME_URL)
+            time.sleep(5)
+        except Exception as e:
+            logger.warning(f"Cookie 注入后打开首页失败: {e}")
+        self._wait_for_cloudflare()
 
         if self.validate_login():
             cookie_string = self.sync_session_from_browser()
