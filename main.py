@@ -1186,35 +1186,37 @@ return '';
     def _inject_hcaptcha_callback_interceptor(self) -> None:
         """Inject a CDP script that captures the inline hCaptcha callback.
 
-        Runs on every new document BEFORE any page JS, so we can intercept
-        hcaptcha.render() and stash the callback for later invocation with
-        our YesCaptcha token.  This lets /hcaptcha/create originate from
-        Discourse's own code path instead of our XHR.
+        The hCaptcha SDK uses Object.defineProperty to set window.hcaptcha,
+        which would replace our getter/setter.  Instead we override
+        Object.defineProperty itself so we can detect when hcaptcha lands on
+        window — regardless of how the SDK writes it — and then wrap its
+        render in-place to grab the callback.
         """
         script = """
 (function() {
-    let _hcaptcha = undefined;
-    Object.defineProperty(window, 'hcaptcha', {
-        configurable: true,
-        enumerable: true,
-        get: function() { return _hcaptcha; },
-        set: function(val) {
-            _hcaptcha = val;
-            if (val && typeof val.render === 'function') {
-                const origRender = val.render;
-                val.render = function() {
-                    const opts = arguments[1] || (arguments[0] && typeof arguments[0] === 'object' && !(arguments[0] instanceof Element) ? arguments[0] : {});
-                    if (typeof opts.callback === 'function') {
-                        window.__hcaptchaCallback = opts.callback;
-                    }
-                    if (opts['data-callback']) {
-                        window.__hcaptchaCallbackName = opts['data-callback'];
-                    }
-                    return origRender.apply(this, arguments);
-                };
-            }
+    var _origDefineProperty = Object.defineProperty;
+    Object.defineProperty = function(obj, prop, descriptor) {
+        var result = _origDefineProperty.call(this, obj, prop, descriptor);
+        if (obj === window && prop === 'hcaptcha') {
+            try {
+                var hc = window.hcaptcha;
+                if (hc && typeof hc.render === 'function') {
+                    var _origRender = hc.render;
+                    hc.render = function() {
+                        var opts = arguments[1] || (arguments[0] && typeof arguments[0] === 'object' && !(arguments[0] instanceof Element) ? arguments[0] : {});
+                        if (typeof opts.callback === 'function') {
+                            window.__hcaptchaCallback = opts.callback;
+                        }
+                        if (opts['data-callback']) {
+                            window.__hcaptchaCallbackName = opts['data-callback'];
+                        }
+                        return _origRender.apply(this, arguments);
+                    };
+                }
+            } catch(_e) {}
         }
-    });
+        return result;
+    };
 })();
 """
         try:
@@ -1277,13 +1279,12 @@ return elements.length > 0;
     var info = {has_hcaptcha: !!window.hcaptcha};
     if (window.hcaptcha) {
         info.hcaptcha_type = typeof window.hcaptcha;
-        info.hcaptcha_keys = Object.keys(window.hcaptcha).slice(0, 6);
+        try { info.hcaptcha_keys = Object.keys(window.hcaptcha).slice(0, 6); } catch(e) {}
         info.has_render = typeof window.hcaptcha.render === 'function';
     }
     info.cb_type = typeof window.__hcaptchaCallback;
     info.cb_name = window.__hcaptchaCallbackName || null;
     info.cb_is_fn = typeof window.__hcaptchaCallback === 'function';
-    // also check for hCaptcha iframe on the page
     var iframe = document.querySelector('iframe[src*=\"hcaptcha\"]');
     info.has_hcaptcha_iframe = !!iframe;
     return JSON.stringify(info);
@@ -1291,18 +1292,9 @@ return elements.length > 0;
 """
         try:
             raw = self.page.run_js(diag_script)
-            if isinstance(raw, str):
-                import json as _json
-                diag = _json.loads(raw)
-                logger.info(
-                    f"hCaptcha 页面诊断: has_hcaptcha={diag.get('has_hcaptcha')} "
-                    f"cb_type={diag.get('cb_type')} "
-                    f"cb_name={diag.get('cb_name')} "
-                    f"has_iframe={diag.get('has_hcaptcha_iframe')} "
-                    f"hcaptcha_keys={diag.get('hcaptcha_keys')}"
-                )
-        except Exception:
-            pass
+            logger.info(f"hCaptcha 诊断 raw_result(type={type(raw).__name__}): {raw!r}")
+        except Exception as _diag_e:
+            logger.warning(f"hCaptcha 诊断执行异常: {_diag_e}")
 
         # Try the captured native callback first.
         callback_script = f"""
@@ -1321,6 +1313,7 @@ return elements.length > 0;
 """
         try:
             result = self.page.run_js(callback_script)
+            logger.info(f"hCaptcha 回调调用结果 (type={type(result).__name__}): {result!r}")
             if isinstance(result, str):
                 if result == 'callback_invoked':
                     logger.info("hCaptcha/create 注册成功 (原生 Discourse 回调)")
