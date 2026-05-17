@@ -1221,6 +1221,53 @@ return elements.length > 0;
             logger.warning(f"注入 hCaptcha token 失败: {e}")
             return False
 
+    def trigger_hcaptcha_callback(self, token: str) -> bool:
+        """Trigger the page's native hCaptcha callback to register token via /hcaptcha/create."""
+        script = f"""
+const token = {json.dumps(token)};
+const textareas = document.querySelectorAll('[name="h-captcha-response"], [name="g-recaptcha-response"]');
+for (const ta of textareas) {{
+  ta.value = token;
+}}
+const hCaptchaDiv = document.querySelector('.h-captcha');
+if (hCaptchaDiv) {{
+  const cb = hCaptchaDiv.getAttribute('data-callback');
+  if (cb && typeof window[cb] === 'function') {{
+    window[cb](token);
+    return JSON.stringify({{ ok: true, via: 'data-callback', name: cb }});
+  }}
+}}
+if (typeof hcaptcha !== 'undefined') {{
+  try {{
+    const nodes = document.querySelectorAll('.h-captcha iframe');
+    for (let i = 0; i < nodes.length; i++) {{
+      try {{
+        hcaptcha.setResponse(i, token);
+        const cb = hcaptcha.getCallback ? hcaptcha.getCallback(i) : null;
+        if (cb) {{ cb(token); return JSON.stringify({{ ok: true, via: 'hcaptcha-api-callback', id: i }}); }}
+      }} catch(e) {{}}
+    }}
+  }} catch(e) {{
+    return JSON.stringify({{ ok: false, error: String(e) }});
+  }}
+}}
+return JSON.stringify({{ ok: false, reason: 'no-callback-found' }});
+"""
+        try:
+            raw = self.page.run_js(script)
+            if isinstance(raw, str):
+                result = json.loads(raw)
+                ok = bool(result.get("ok"))
+                if ok:
+                    logger.info(f"已触发原生 hCaptcha 回调 (via {result.get('via')})，等待 /hcaptcha/create 完成...")
+                    time.sleep(4)
+                else:
+                    logger.warning(f"未能触发原生 hCaptcha 回调: {result}")
+                return ok
+        except Exception as e:
+            logger.warning(f"触发原生 hCaptcha 回调异常: {e}")
+        return False
+
     def solve_hcaptcha_if_needed(self) -> Optional[str]:
         sitekey = self.detect_hcaptcha_sitekey()
         if not sitekey:
@@ -2040,15 +2087,19 @@ return new Promise((resolve) => {{
                 )
                 hcaptcha_token = ""
             if hcaptcha_token:
+                # Trigger the page's native hCaptcha callback which internally
+                # calls /hcaptcha/create to register the token server-side.
+                # This bypasses Cloudflare because the page's own JS handles the XHR.
+                self.trigger_hcaptcha_callback(hcaptcha_token)
+
                 page_state = self.get_login_page_state()
                 if page_state.get("has_turnstile"):
-                    logger.info("检测到新 Turnstile (Cloudflare)，先解决再注册 hCaptcha...")
+                    logger.info("检测到新 Turnstile (Cloudflare)，先解决再提交登录...")
                     self.solve_turnstile_if_needed()
                     time.sleep(3)
-                # Submit login form with both tokens (Turnstile + hCaptcha)
-                # via real page navigation, which passes Cloudflare unlike XHR.
+
                 self._wait_for_cloudflare()
-                logger.info("通过表单提交登录（绕过 CF 对 XHR 的拦截）...")
+                logger.info("通过浏览器表单提交登录...")
                 self.inject_hcaptcha_token(hcaptcha_token)
                 if not self.submit_login_form():
                     logger.warning("表单提交失败，尝试继续接口登录")
