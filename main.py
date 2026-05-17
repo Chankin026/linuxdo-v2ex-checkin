@@ -736,6 +736,7 @@ class LinuxDoBrowser:
         co.set_user_agent(browser_user_agent)
         self.browser = Chromium(co)
         self.page = self.browser.new_tab()
+        self._inject_hcaptcha_callback_interceptor()
         self.session = requests.Session()
         if FORCE_IPV4:
             self.session.curl_options = {
@@ -1182,6 +1183,46 @@ return '';
                 return match.group(1).strip()
         return ""
 
+    def _inject_hcaptcha_callback_interceptor(self) -> None:
+        """Inject a CDP script that captures the inline hCaptcha callback.
+
+        Runs on every new document BEFORE any page JS, so we can intercept
+        hcaptcha.render() and stash the callback for later invocation with
+        our YesCaptcha token.  This lets /hcaptcha/create originate from
+        Discourse's own code path instead of our XHR.
+        """
+        script = """
+(function() {
+    let _hcaptcha = undefined;
+    Object.defineProperty(window, 'hcaptcha', {
+        configurable: true,
+        enumerable: true,
+        get: function() { return _hcaptcha; },
+        set: function(val) {
+            _hcaptcha = val;
+            if (val && typeof val.render === 'function') {
+                const origRender = val.render;
+                val.render = function() {
+                    const opts = arguments[1] || (arguments[0] && typeof arguments[0] === 'object' && !(arguments[0] instanceof Element) ? arguments[0] : {});
+                    if (typeof opts.callback === 'function') {
+                        window.__hcaptchaCallback = opts.callback;
+                    }
+                    if (opts['data-callback']) {
+                        window.__hcaptchaCallbackName = opts['data-callback'];
+                    }
+                    return origRender.apply(this, arguments);
+                };
+            }
+        }
+    });
+})();
+"""
+        try:
+            self.page.run_cdp('Page.addScriptToEvaluateOnNewDocument', source=script)
+            logger.info("已注入 hCaptcha 回调拦截器 (CDP)")
+        except Exception as e:
+            logger.warning(f"注入 hCaptcha 回调拦截器失败 (CDP): {e}")
+
     def inject_hcaptcha_token(self, token: str) -> bool:
         script = f"""
 const token = {json.dumps(token)};
@@ -1223,11 +1264,42 @@ return elements.length > 0;
             return False
 
     def _register_hcaptcha_token(self, token: str) -> bool:
-        """Register hCaptcha token via /hcaptcha/create using browser XHR.
+        """Register hCaptcha token via the native Discourse callback.
 
-        Must be called AFTER a fresh Turnstile is solved, so the browser has
-        a valid cf_clearance for the /hcaptcha/create endpoint.
+        We intercept hcaptcha.render() via CDP to capture Discourse's inline
+        callback.  Invoking it directly triggers the same XHR code path that a
+        real user interaction would — this may bypass Cloudflare where our own
+        XHR/fetch gets blocked.
         """
+        # Try the captured native callback first.
+        script = """
+(function() {
+    var cb = window.__hcaptchaCallback;
+    if (cb && typeof cb === 'function') {
+        try {
+            cb(arguments[0]);
+            return 'callback_invoked';
+        } catch(e) {
+            return 'callback_error:' + String(e);
+        }
+    }
+    return 'no_callback';
+})();
+"""
+        try:
+            result = self.page.run_js(script)
+            if isinstance(result, str):
+                if result == 'callback_invoked':
+                    logger.info("hCaptcha/create 注册成功 (原生 Discourse 回调)")
+                    return True
+                if result.startswith('callback_error:'):
+                    logger.warning(f"hCaptcha 原生回调抛出异常: {result}")
+                elif result == 'no_callback':
+                    logger.info("未捕获到 hCaptcha 原生回调，回退到浏览器 XHR")
+        except Exception as e:
+            logger.warning(f"hCaptcha 原生回调调用失败: {e}")
+
+        # Fallback: browser XHR
         csrf_token = self.fetch_csrf_token()
         if not csrf_token:
             logger.error("hCaptcha 注册缺少 CSRF token")
