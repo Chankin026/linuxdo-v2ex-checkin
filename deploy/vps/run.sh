@@ -172,6 +172,11 @@ run_update_phase() {
 
 run_main_phase() {
   log "Running main.py at commit $(git_head_short HEAD)"
+
+  # Cleanup orphaned Chrome processes from any previously crashed run.
+  pkill -9 -f 'chrome.*DrissionPage' 2>/dev/null || true
+  pkill -9 -f 'chrome.*remote-debugging-port' 2>/dev/null || true
+
   if should_use_xvfb; then
     if ! command -v xvfb-run >/dev/null 2>&1; then
       log "DISPLAY is empty and xvfb-run is required because LinuxDo uses a headed browser."

@@ -11,6 +11,10 @@ Environment=LC_ALL=C.UTF-8
 EnvironmentFile=/etc/linuxdo-v2ex-checkin.env
 ExecStartPre=/usr/bin/env bash /opt/linuxdo-v2ex-checkin/deploy/vps/run.sh --update-only
 ExecStart=/usr/bin/env bash /opt/linuxdo-v2ex-checkin/deploy/vps/run.sh --run-only
+# Kill orphaned Chrome on any exit path (crash / SIGKILL / timeout).
+ExecStopPost=-/usr/bin/pkill -9 -f 'chrome.*DrissionPage'
+ExecStopPost=-/usr/bin/pkill -9 -f 'chrome.*remote-debugging-port'
+
 User=root
 Group=root
 
