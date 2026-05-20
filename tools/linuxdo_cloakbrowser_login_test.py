@@ -218,6 +218,10 @@ def find_first(page, selectors: List[str]):
     return None
 
 
+def locator_exists(locator) -> bool:
+    return locator is not None
+
+
 def try_password_login(page, context, username: str, password: str) -> Tuple[bool, Dict[str, object]]:
     state = navigate_and_capture(page, LOGIN_URL, "password-login")
 
@@ -233,8 +237,9 @@ def try_password_login(page, context, username: str, password: str) -> Tuple[boo
     password_input = find_first(
         page,
         [
-            'input[name="password"]',
             '#login-account-password',
+            'form#login-form input[type="password"]',
+            'input[name="password"]',
             'input[type="password"]',
             'input[autocomplete="current-password"]',
         ],
@@ -242,13 +247,15 @@ def try_password_login(page, context, username: str, password: str) -> Tuple[boo
     submit_button = find_first(
         page,
         [
+            '#login-button',
+            'button.login-page-cta__login',
+            'form#login-form button',
             'button[type="submit"]',
-            'form button.btn-primary',
             'form button',
         ],
     )
 
-    if not login_input or not password_input or not submit_button:
+    if not locator_exists(login_input) or not locator_exists(password_input) or not locator_exists(submit_button):
         print("[password] login form not ready", flush=True)
         return False, state
 
