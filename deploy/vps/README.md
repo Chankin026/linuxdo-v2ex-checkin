@@ -198,10 +198,11 @@ VPS 服务会通过 `deploy/vps/run.sh` 启动。
 
 1. 记录当前本地提交
 2. 执行 `git fetch --prune`
-3. 如果远端有新代码，则执行 fast-forward 更新
-4. 检查 `requirements.txt` 是否变化
-5. 只有在依赖变化时才执行 `.venv/bin/pip install -r requirements.txt`
-6. 最后执行 `main.py`
+3. 如果仓库里有本地改动，先自动执行 `git stash push --include-untracked`
+4. 如果远端有新代码，则执行 fast-forward 更新
+5. 检查 `requirements.txt` 是否变化
+6. 只有在依赖变化时才执行 `.venv/bin/pip install -r requirements.txt`
+7. 最后执行 `main.py`
 
 默认 `AUTO_UPDATE_STRICT=true`：
 
@@ -216,13 +217,22 @@ AUTO_INSTALL_DEPS=true
 AUTO_UPDATE_STRICT=true
 ```
 
+如果你需要查看被自动留存的本地改动，可以在服务器上执行：
+
+```bash
+cd /opt/linuxdo-v2ex-checkin
+sudo git stash list
+sudo git stash show -p stash@{0}
+```
+
 如果 `DISPLAY` 为空，`deploy/vps/run.sh` 会自动通过 `xvfb-run` 启动 `main.py`，因此 LinuxDo 的有头浏览器仍可正常运行。
 
 ## 后续更新
 
 ```bash
 cd /opt/linuxdo-v2ex-checkin
-sudo git pull
+sudo git fetch --prune origin
+sudo git merge --ff-only origin/main
 sudo .venv/bin/pip install -r requirements.txt
 sudo systemctl start linuxdo-v2ex-checkin.service
 ```

@@ -194,6 +194,12 @@ NODESEEK_PASSWORD_2=account2_password
 | `AUTO_INSTALL_DEPS` | 依赖变化时是否自动 `pip install -r requirements.txt` | 默认 `true` |
 | `AUTO_UPDATE_STRICT` | 更新失败时是否中止本次任务 | 默认 `true` |
 
+说明：
+
+- 当远端存在新提交、且 `deploy/vps/run.sh` 准备执行 fast-forward 更新时，会先检测仓库是否有本地改动
+- 如果存在已跟踪或未跟踪改动，会先执行 `git stash push --include-untracked`
+- 原改动会保留在 `git stash list` 中，便于后续人工检查
+
 ## 配置示例
 
 ### VPS 常用组合

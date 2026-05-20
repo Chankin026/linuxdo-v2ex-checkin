@@ -27,7 +27,12 @@ apt install -y ./google-chrome-stable_current_amd64.deb
 
 echo "[3/6] Clone or update repo..."
 if [[ -d "$INSTALL_DIR/.git" ]]; then
-  git -C "$INSTALL_DIR" pull
+  if git -C "$INSTALL_DIR" remote get-url origin >/dev/null 2>&1; then
+    git -C "$INSTALL_DIR" remote set-url origin "$REPO_URL"
+  else
+    git -C "$INSTALL_DIR" remote add origin "$REPO_URL"
+  fi
+  INSTALL_DIR="$INSTALL_DIR" AUTO_INSTALL_DEPS=false bash "$INSTALL_DIR/deploy/vps/run.sh" --update-only
 else
   rm -rf "$INSTALL_DIR"
   git clone "$REPO_URL" "$INSTALL_DIR"

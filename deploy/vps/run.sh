@@ -69,6 +69,26 @@ git_head_short() {
   git -C "$INSTALL_DIR" rev-parse --short "$1" 2>/dev/null || true
 }
 
+has_local_repo_changes() {
+  [[ -n "$(git -C "$INSTALL_DIR" status --porcelain --untracked-files=all 2>/dev/null)" ]]
+}
+
+stash_local_repo_changes() {
+  local old_head_short="$1"
+  local remote_head_short="$2"
+  local stash_message
+
+  stash_message="auto-update-before-${remote_head_short:-unknown}-from-${old_head_short:-unknown}"
+  log "Local repository changes detected; stashing them before fast-forward update."
+
+  if ! git -C "$INSTALL_DIR" stash push --include-untracked --message "$stash_message" >/dev/null; then
+    log "Failed to stash local repository changes."
+    return 1
+  fi
+
+  log "Local repository changes saved to git stash: $stash_message"
+}
+
 auto_update_repo() {
   if [[ ! -d "$INSTALL_DIR/.git" ]]; then
     log "Git repository not found in $INSTALL_DIR, skipping auto update."
@@ -129,6 +149,16 @@ auto_update_repo() {
   if [[ "$old_head" == "$remote_head" ]]; then
     log "Repository already up to date at ${old_head_short:-unknown}."
     return 0
+  fi
+
+  if has_local_repo_changes; then
+    if ! stash_local_repo_changes "$old_head_short" "$remote_head_short"; then
+      if as_bool "$AUTO_UPDATE_STRICT"; then
+        strict_abort "AUTO_UPDATE_STRICT enabled: unable to stash local repository changes before updating (${old_head_short:-unknown} -> ${remote_head_short:-unknown}), so this run was stopped."
+      fi
+      log "AUTO_UPDATE_STRICT disabled, continuing with the currently checked out local code."
+      return 0
+    fi
   fi
 
   if ! git -C "$INSTALL_DIR" merge --ff-only "$upstream_ref"; then
