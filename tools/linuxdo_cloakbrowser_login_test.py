@@ -5,12 +5,13 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 HOME_URL = "https://linux.do/"
 LOGIN_URL = "https://linux.do/login"
 ACCOUNT_PREFERENCES_URL = "https://linux.do/my/preferences/account"
+YESCAPTCHA_API_BASE_URL = "https://api.yescaptcha.com"
 
 
 def load_env_file(path: str, override: bool = False) -> bool:
@@ -81,6 +82,16 @@ def env_str(name: str, default: str = "") -> str:
     return value.strip() if isinstance(value, str) else default
 
 
+def env_int(name: str, default: int) -> int:
+    value = env_str(name)
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
 def parse_cookie_string(cookie_str: str) -> List[Dict[str, str]]:
     cookies: List[Dict[str, str]] = []
     for part in cookie_str.split(";"):
@@ -108,6 +119,106 @@ def get_cookie_names(context) -> List[str]:
         return sorted({cookie.get("name", "") for cookie in context.cookies() if cookie.get("name")})
     except Exception:
         return []
+
+
+class YesCaptchaSolverError(Exception):
+    pass
+
+
+class YesCaptchaSolver:
+    def __init__(
+        self,
+        client_key: str,
+        api_base_url: str,
+        max_retries: int,
+        retry_interval: int,
+        timeout: int,
+        advanced: bool = False,
+    ) -> None:
+        self.client_key = client_key
+        self.api_base_url = api_base_url.rstrip("/")
+        self.max_retries = max_retries
+        self.retry_interval = retry_interval
+        self.timeout = timeout
+        self.advanced = advanced
+
+    def solve(
+        self,
+        url: str,
+        sitekey: str,
+        user_agent: str = "",
+        captcha_type: str = "turnstile",
+    ) -> str:
+        task_id = self._create_task(url, sitekey, user_agent, captcha_type)
+        return self._wait_for_result(task_id)
+
+    def _create_task(self, url: str, sitekey: str, user_agent: str, captcha_type: str) -> str:
+        import httpx
+
+        if captcha_type == "hcaptcha":
+            task_type = "HCaptchaTaskProxyless"
+        else:
+            task_type = "TurnstileTaskProxylessM1" if self.advanced else "TurnstileTaskProxyless"
+
+        payload = {
+            "clientKey": self.client_key,
+            "task": {
+                "type": task_type,
+                "websiteURL": url,
+                "websiteKey": sitekey,
+            },
+            "softID": "62709",
+        }
+        if user_agent:
+            payload["task"]["userAgent"] = user_agent
+
+        try:
+            response = httpx.post(
+                f"{self.api_base_url}/createTask",
+                json=payload,
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            result = response.json()
+        except Exception as exc:
+            raise YesCaptchaSolverError(f"createTask failed: {exc}") from exc
+
+        if result.get("errorId") == 0 and result.get("taskId"):
+            return str(result["taskId"])
+        raise YesCaptchaSolverError(result.get("errorDescription") or "createTask returned error")
+
+    def _wait_for_result(self, task_id: str) -> str:
+        import httpx
+
+        payload = {"clientKey": self.client_key, "taskId": task_id}
+
+        for _ in range(self.max_retries):
+            try:
+                response = httpx.post(
+                    f"{self.api_base_url}/getTaskResult",
+                    json=payload,
+                    timeout=self.timeout,
+                )
+                response.raise_for_status()
+                result = response.json()
+            except Exception as exc:
+                raise YesCaptchaSolverError(f"getTaskResult failed: {exc}") from exc
+
+            if result.get("errorId", 0) > 0:
+                raise YesCaptchaSolverError(
+                    result.get("errorDescription") or "getTaskResult returned error"
+                )
+
+            if result.get("status") == "ready":
+                solution = result.get("solution", {})
+                token = solution.get("token") or solution.get("gRecaptchaResponse")
+                if token:
+                    return str(token)
+                raise YesCaptchaSolverError("ready response did not include token")
+
+            time.sleep(self.retry_interval)
+
+        raise YesCaptchaSolverError("captcha solving timed out")
 
 
 def get_page_state(page) -> Dict[str, object]:
@@ -222,8 +333,345 @@ def locator_exists(locator) -> bool:
     return locator is not None
 
 
-def try_password_login(page, context, username: str, password: str) -> Tuple[bool, Dict[str, object]]:
+def detect_turnstile_sitekey(page) -> str:
+    script = """
+() => {
+  const widget = document.querySelector('.cf-turnstile,[data-sitekey]');
+  if (widget && widget.getAttribute('data-sitekey')) {
+    return widget.getAttribute('data-sitekey');
+  }
+  const iframe = document.querySelector('iframe[src*="turnstile"]');
+  if (iframe && iframe.src) {
+    const match = iframe.src.match(/[?&]sitekey=([^&]+)/);
+    if (match) return decodeURIComponent(match[1]);
+  }
+  return '';
+}
+"""
+    try:
+        result = page.evaluate(script)
+    except Exception:
+        result = ""
+    return result.strip() if isinstance(result, str) else ""
+
+
+def inject_turnstile_token(page, token: str) -> bool:
+    script = f"""
+() => {{
+  const token = {json.dumps(token)};
+  const selectors = [
+    'textarea[name="cf-turnstile-response"]',
+    'input[name="cf-turnstile-response"]',
+    'textarea[name="cf_turnstile_response"]',
+    'input[name="cf_turnstile_response"]'
+  ];
+  let elements = [];
+  for (const selector of selectors) {{
+    elements = elements.concat(Array.from(document.querySelectorAll(selector)));
+  }}
+  if (!elements.length) {{
+    const form = document.querySelector('form#login-form') || document.querySelector('form');
+    if (form) {{
+      const textarea = document.createElement('textarea');
+      textarea.name = 'cf-turnstile-response';
+      textarea.style.display = 'none';
+      form.appendChild(textarea);
+      elements.push(textarea);
+    }}
+  }}
+  for (const el of elements) {{
+    el.value = token;
+    el.innerHTML = token;
+    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+  }}
+  const widget = document.querySelector('.cf-turnstile,[data-callback]');
+  const callbackName = widget ? widget.getAttribute('data-callback') : null;
+  if (callbackName && typeof window[callbackName] === 'function') {{
+    try {{ window[callbackName](token); }} catch (e) {{}}
+  }}
+  window.__cfTurnstileResponse = token;
+  window.__turnstileToken = token;
+  return elements.length > 0;
+}}
+"""
+    try:
+        return bool(page.evaluate(script))
+    except Exception:
+        return False
+
+
+def detect_hcaptcha_sitekey(page) -> str:
+    script = """
+() => {
+  const widget = document.querySelector('.h-captcha,[data-hcaptcha-sitekey]');
+  if (widget) {
+    const key = widget.getAttribute('data-sitekey') || widget.getAttribute('data-hcaptcha-sitekey');
+    if (key) return key;
+  }
+  const iframe = document.querySelector('iframe[src*="hcaptcha.com"]');
+  if (iframe && iframe.src) {
+    const match = iframe.src.match(/[?&]sitekey=([^&]+)/);
+    if (match) return decodeURIComponent(match[1]);
+  }
+  return '';
+}
+"""
+    try:
+        result = page.evaluate(script)
+    except Exception:
+        result = ""
+    return result.strip() if isinstance(result, str) else ""
+
+
+def inject_hcaptcha_token(page, token: str) -> bool:
+    script = f"""
+() => {{
+  const token = {json.dumps(token)};
+  const selectors = [
+    'textarea[name="h-captcha-response"]',
+    'input[name="h-captcha-response"]',
+    'textarea[name="g-recaptcha-response"]',
+    'input[name="g-recaptcha-response"]'
+  ];
+  let elements = [];
+  for (const selector of selectors) {{
+    elements = elements.concat(Array.from(document.querySelectorAll(selector)));
+  }}
+  if (!elements.length) {{
+    const form = document.querySelector('form#login-form') || document.querySelector('form');
+    if (form) {{
+      const textarea = document.createElement('textarea');
+      textarea.name = 'h-captcha-response';
+      textarea.style.display = 'none';
+      form.appendChild(textarea);
+      elements.push(textarea);
+    }}
+  }}
+  for (const el of elements) {{
+    el.value = token;
+    el.innerHTML = token;
+    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+  }}
+  window.__hcaptchaToken = token;
+  window.__hcaptchaResponse = token;
+  return elements.length > 0;
+}}
+"""
+    try:
+        return bool(page.evaluate(script))
+    except Exception:
+        return False
+
+
+def get_csrf_token(page) -> str:
+    script = """
+() => {
+  const meta = document.querySelector('meta[name="csrf-token"]');
+  if (meta && meta.content) {
+    return meta.content;
+  }
+  return '';
+}
+"""
+    try:
+        result = page.evaluate(script)
+    except Exception:
+        result = ""
+    return result.strip() if isinstance(result, str) else ""
+
+
+def fetch_csrf_token_from_linuxdo(page) -> Dict[str, object]:
+    script = """
+async () => {
+  const response = await fetch('/session/csrf', {
+    method: 'GET',
+    headers: {
+      'Accept': 'application/json, text/javascript, */*; q=0.01',
+      'X-Requested-With': 'XMLHttpRequest'
+    },
+    credentials: 'same-origin'
+  });
+  return {
+    ok: response.ok,
+    status: response.status,
+    body: await response.text()
+  };
+}
+"""
+    fallback = {"ok": False, "status": 0, "body": "", "token": ""}
+    try:
+        result = page.evaluate(script)
+    except Exception as exc:
+        fallback["body"] = str(exc)
+        return fallback
+    if not isinstance(result, dict):
+        return fallback
+    body = str(result.get("body", ""))
+    token = ""
+    try:
+        parsed = json.loads(body) if body else {}
+        if isinstance(parsed, dict):
+            token = str(parsed.get("csrf") or "")
+    except json.JSONDecodeError:
+        token = ""
+    result["token"] = token
+    return result
+
+
+def register_hcaptcha_token_with_linuxdo(page, csrf_token: str, token: str) -> Dict[str, object]:
+    if not csrf_token or not token:
+        return {"success": False, "status": 0, "body": "", "json": {}}
+    script = f"""
+async () => {{
+  const response = await fetch('/hcaptcha/create.json', {{
+    method: 'POST',
+    headers: {{
+      'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+      'X-CSRF-Token': {json.dumps(csrf_token)},
+      'X-Requested-With': 'XMLHttpRequest'
+    }},
+    body: new URLSearchParams({{ token: {json.dumps(token)} }}).toString(),
+    credentials: 'same-origin'
+  }});
+  return {{
+    ok: response.ok,
+    status: response.status,
+    body: await response.text()
+  }};
+}}
+"""
+    try:
+        result = page.evaluate(script)
+    except Exception as exc:
+        return {"success": False, "status": 0, "body": str(exc), "json": {}}
+    if not isinstance(result, dict):
+        return {"success": False, "status": 0, "body": "", "json": {}}
+    body = str(result.get("body", ""))
+    parsed = {}
+    try:
+        parsed = json.loads(body) if body else {}
+    except json.JSONDecodeError:
+        parsed = {}
+    result["json"] = parsed if isinstance(parsed, dict) else {}
+    result["success"] = bool(result.get("ok")) and result["json"].get("success") == "OK"
+    return result
+
+
+def submit_login_with_linuxdo(
+    page,
+    csrf_token: str,
+    username: str,
+    password: str,
+    timezone: str,
+) -> Dict[str, object]:
+    if not csrf_token or not username or not password:
+        return {"ok": False, "status": 0, "url": "", "body": ""}
+    script = f"""
+async () => {{
+  const response = await fetch('/session', {{
+    method: 'POST',
+    headers: {{
+      'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+      'X-CSRF-Token': {json.dumps(csrf_token)},
+      'X-Requested-With': 'XMLHttpRequest',
+      'Discourse-Present': 'true',
+      'Accept': '*/*'
+    }},
+    body: new URLSearchParams({{
+      login: {json.dumps(username)},
+      password: {json.dumps(password)},
+      second_factor_method: '1',
+      timezone: {json.dumps(timezone or 'Asia/Shanghai')}
+    }}).toString(),
+    credentials: 'same-origin'
+  }});
+  return {{
+    ok: response.ok,
+    status: response.status,
+    url: response.url,
+    body: await response.text()
+  }};
+}}
+"""
+    try:
+        result = page.evaluate(script)
+    except Exception as exc:
+        return {"ok": False, "status": 0, "url": "", "body": str(exc)}
+    return result if isinstance(result, dict) else {"ok": False, "status": 0, "url": "", "body": ""}
+
+
+def hcaptcha_checkbox_looks_solved(frame) -> bool:
+    try:
+        checkbox = frame.locator("#checkbox")
+        if checkbox.count() == 0:
+            return False
+        return (checkbox.get_attribute("aria-checked") or "").strip().lower() == "true"
+    except Exception:
+        return False
+
+
+def try_click_hcaptcha_checkbox_if_needed(page) -> bool:
+    try:
+        frame = page.frame_locator('iframe[src*="hcaptcha.com"]')
+        checkbox = frame.locator("#checkbox")
+        if checkbox.count() == 0:
+            return False
+        if hcaptcha_checkbox_looks_solved(frame):
+            return True
+        checkbox.click()
+        wait_for_settle(2)
+        return hcaptcha_checkbox_looks_solved(frame)
+    except Exception:
+        return False
+
+
+def solve_turnstile_if_needed(page, user_agent: str, solver: Optional[YesCaptchaSolver]) -> str:
+    sitekey = detect_turnstile_sitekey(page)
+    if not sitekey:
+        print("[turnstile] no sitekey detected", flush=True)
+        return ""
+    print(f"[turnstile] detected sitekey={sitekey[:12]}...", flush=True)
+    if solver is None:
+        print("[turnstile] solver not configured", flush=True)
+        return ""
+    token = solver.solve(LOGIN_URL, sitekey, user_agent=user_agent, captcha_type="turnstile")
+    inject_turnstile_token(page, token)
+    print("[turnstile] token injected", flush=True)
+    return token
+
+
+def solve_hcaptcha_if_needed(page, user_agent: str, solver: Optional[YesCaptchaSolver]) -> str:
+    sitekey = detect_hcaptcha_sitekey(page)
+    if not sitekey:
+        print("[hcaptcha] no sitekey detected", flush=True)
+        return ""
+    print(f"[hcaptcha] detected sitekey={sitekey[:12]}...", flush=True)
+    if solver is None:
+        print("[hcaptcha] solver not configured", flush=True)
+        return ""
+    token = solver.solve(LOGIN_URL, sitekey, user_agent=user_agent, captcha_type="hcaptcha")
+    inject_hcaptcha_token(page, token)
+    print("[hcaptcha] token injected", flush=True)
+    return token
+
+
+def try_password_login(
+    page,
+    context,
+    username: str,
+    password: str,
+    solver: Optional[YesCaptchaSolver],
+) -> Tuple[bool, Dict[str, object]]:
     state = navigate_and_capture(page, LOGIN_URL, "password-login")
+    user_agent = page.evaluate("() => navigator.userAgent")
+
+    try:
+        solve_turnstile_if_needed(page, user_agent, solver)
+        wait_for_settle(2)
+    except Exception as exc:
+        print(f"[turnstile] solve failed: {exc}", flush=True)
 
     login_input = find_first(
         page,
@@ -273,6 +721,59 @@ def try_password_login(page, context, username: str, password: str) -> Tuple[boo
         flush=True,
     )
 
+    if post_state.get("has_hcaptcha"):
+        try:
+            checkbox_clicked = try_click_hcaptcha_checkbox_if_needed(page)
+            print(f"[hcaptcha] checkbox_clicked={checkbox_clicked}", flush=True)
+            wait_for_settle(2)
+            post_state = get_page_state(page)
+            if not post_state.get("has_hcaptcha"):
+                ok, validation_state = validate_login(page, context)
+                return ok, validation_state or post_state
+            hcaptcha_token = solve_hcaptcha_if_needed(page, user_agent, solver)
+            wait_for_settle(2)
+            csrf_info = fetch_csrf_token_from_linuxdo(page)
+            csrf_token = str(csrf_info.get("token") or get_csrf_token(page))
+            print(
+                f"[linuxdo-csrf] status={csrf_info.get('status')} token_present={bool(csrf_token)} "
+                f"body={str(csrf_info.get('body', ''))[:200]}",
+                flush=True,
+            )
+            registered = register_hcaptcha_token_with_linuxdo(page, csrf_token, hcaptcha_token)
+            print(
+                f"[hcaptcha] registered_with_linuxdo={registered.get('success')} "
+                f"status={registered.get('status')} body={str(registered.get('body', ''))[:200]}",
+                flush=True,
+            )
+            if registered.get("success"):
+                timezone_value = "Asia/Shanghai"
+                try:
+                    timezone_value = page.evaluate("() => Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai'")
+                except Exception:
+                    pass
+                login_result = submit_login_with_linuxdo(
+                    page,
+                    csrf_token,
+                    username,
+                    password,
+                    str(timezone_value or "Asia/Shanghai"),
+                )
+                print(
+                    f"[linuxdo-session] status={login_result.get('status')} url={login_result.get('url')} "
+                    f"body={str(login_result.get('body', ''))[:200]}",
+                    flush=True,
+                )
+                wait_for_settle(10)
+                post_state = get_page_state(page)
+                print(
+                    f"[password-post-hcaptcha] url={post_state.get('url')} challenge={post_state.get('is_challenge')} "
+                    f"turnstile={post_state.get('has_turnstile')} hcaptcha={post_state.get('has_hcaptcha')} "
+                    f"logged_in={post_state.get('looks_logged_in')}",
+                    flush=True,
+                )
+        except Exception as exc:
+            print(f"[hcaptcha] solve failed: {exc}", flush=True)
+
     ok, validation_state = validate_login(page, context)
     return ok, validation_state or post_state
 
@@ -305,6 +806,20 @@ def main() -> int:
     cookie_str = env_str("LINUXDO_COOKIES")
     username = env_str("LINUXDO_USERNAME") or env_str("USERNAME")
     password = env_str("LINUXDO_PASSWORD") or env_str("PASSWORD")
+    solver_key = (
+        env_str("CLIENTT_KEY")
+        or env_str("LINUXDO_YESCAPTCHA_CLIENT_KEY")
+        or env_str("YESCAPTCHA_CLIENT_KEY")
+    )
+    solver_api_base = (
+        env_str("LINUXDO_YESCAPTCHA_API_BASE_URL")
+        or env_str("YESCAPTCHA_API_BASE_URL")
+        or YESCAPTCHA_API_BASE_URL
+    )
+    solver_advanced = env_str("LINUXDO_YESCAPTCHA_ADVANCED", "").lower() in {"1", "true", "yes", "on"}
+    solver_max_retries = env_int("LINUXDO_YESCAPTCHA_MAX_RETRIES", env_int("YESCAPTCHA_MAX_RETRIES", 20))
+    solver_retry_interval = env_int("LINUXDO_YESCAPTCHA_RETRY_INTERVAL", env_int("YESCAPTCHA_RETRY_INTERVAL", 3))
+    solver_timeout = env_int("LINUXDO_YESCAPTCHA_TIMEOUT", env_int("YESCAPTCHA_TIMEOUT", 60))
 
     if not cookie_str and not (username and password):
         print("Need LINUXDO_COOKIES or LINUXDO_USERNAME/LINUXDO_PASSWORD", file=sys.stderr)
@@ -335,6 +850,16 @@ def main() -> int:
         context = launch_context(**launch_kwargs)
 
     page = context.new_page()
+    solver = None
+    if solver_key:
+        solver = YesCaptchaSolver(
+            client_key=solver_key,
+            api_base_url=solver_api_base,
+            max_retries=solver_max_retries,
+            retry_interval=solver_retry_interval,
+            timeout=solver_timeout,
+            advanced=solver_advanced,
+        )
     result = None
 
     try:
@@ -348,7 +873,7 @@ def main() -> int:
 
         if username and password:
             print("[flow] trying password login", flush=True)
-            ok, state = try_password_login(page, context, username, password)
+            ok, state = try_password_login(page, context, username, password, solver)
             result = build_result(ok, "password", state, args.screenshot, loaded_envs)
             if ok:
                 print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)

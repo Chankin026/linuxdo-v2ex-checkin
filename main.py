@@ -5,6 +5,7 @@ new Env("Linux.Do 签到")
 
 import functools
 import hashlib
+import importlib
 import json
 import os
 import random
@@ -21,11 +22,6 @@ from loguru import logger
 from nodeseek import NodeSeekDailyMission
 from notify import NotificationManager
 from v2ex import V2EXDailyMission
-from xiaoheihe import (
-    XIAOHEIHE_REQUEST_MODE_LABELS,
-    XiaoHeiHeDailyMission,
-    resolve_request_mode_label,
-)
 
 try:
     from tabulate import tabulate
@@ -191,13 +187,24 @@ def build_browser_user_agent(platform_identifier: str, impersonate: str) -> str:
 
 def log_xiaoheihe_mode(mode: str, adb_serial: str = "") -> None:
     lowered = (mode or "").strip().lower()
-    label = resolve_request_mode_label(lowered)
+    try:
+        label = load_xiaoheihe_module().resolve_request_mode_label(lowered)
+    except Exception:
+        label = lowered or "signer"
     logger.info(f"Xiaoheihe mode: {label}")
 
 
 PRELOADED_ENV_FILES = preload_env_files()
 if PRELOADED_ENV_FILES:
     logger.info("Preloaded env file(s): " + ", ".join(PRELOADED_ENV_FILES))
+
+
+def load_linuxdo_cloak_module():
+    return importlib.import_module("linuxdo_cloak")
+
+
+def load_xiaoheihe_module():
+    return importlib.import_module("xiaoheihe")
 
 
 class YesCaptchaSolverError(Exception):
@@ -3203,7 +3210,7 @@ def run_configured_tasks() -> None:
 
     if has_xiaoheihe_credentials:
         log_xiaoheihe_mode(XIAOHEIHE_REQUEST_MODE)
-        XiaoHeiHeDailyMission(
+        load_xiaoheihe_module().XiaoHeiHeDailyMission(
             notifier=NotificationManager(),
             account_name=XIAOHEIHE_ACCOUNT_NAME,
             cookie=XIAOHEIHE_COOKIE,
@@ -3218,8 +3225,8 @@ def run_configured_tasks() -> None:
         logger.info("未配置 Xiaoheihe Cookie，跳过小黑盒每日签到")
 
     if has_linuxdo_credentials:
-        browser = LinuxDoBrowser()
-        browser.run()
+        linuxdo_cloak = load_linuxdo_cloak_module()
+        linuxdo_cloak.run_linuxdo_task(headless=False)
     else:
         logger.info("未配置 LinuxDo 登录信息，跳过 LinuxDo 任务")
 

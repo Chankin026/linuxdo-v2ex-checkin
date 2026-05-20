@@ -4,3 +4,4 @@ loguru==0.7.2
 curl-cffi
 bs4
 cryptography
+cloakbrowser
