@@ -92,6 +92,46 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def load_solver_settings() -> Dict[str, object]:
+    return {
+        "api_base_url": (
+            env_str("LINUXDO_YESCAPTCHA_API_BASE_URL")
+            or env_str("YESCAPTCHA_API_BASE_URL")
+            or YESCAPTCHA_API_BASE_URL
+        ),
+        "advanced": env_str("LINUXDO_YESCAPTCHA_ADVANCED", "").lower()
+        in {"1", "true", "yes", "on"},
+        "turnstile": {
+            "max_retries": env_int(
+                "LINUXDO_YESCAPTCHA_MAX_RETRIES",
+                env_int("YESCAPTCHA_MAX_RETRIES", 20),
+            ),
+            "retry_interval": env_int(
+                "LINUXDO_YESCAPTCHA_RETRY_INTERVAL",
+                env_int("YESCAPTCHA_RETRY_INTERVAL", 3),
+            ),
+            "timeout": env_int(
+                "LINUXDO_YESCAPTCHA_TIMEOUT",
+                env_int("YESCAPTCHA_TIMEOUT", 60),
+            ),
+        },
+        "hcaptcha": {
+            "max_retries": env_int(
+                "LINUXDO_YESCAPTCHA_HCAPTCHA_MAX_RETRIES",
+                env_int("YESCAPTCHA_HCAPTCHA_MAX_RETRIES", 45),
+            ),
+            "retry_interval": env_int(
+                "LINUXDO_YESCAPTCHA_HCAPTCHA_RETRY_INTERVAL",
+                env_int("YESCAPTCHA_HCAPTCHA_RETRY_INTERVAL", 4),
+            ),
+            "timeout": env_int(
+                "LINUXDO_YESCAPTCHA_HCAPTCHA_TIMEOUT",
+                env_int("YESCAPTCHA_HCAPTCHA_TIMEOUT", 600),
+            ),
+        },
+    }
+
+
 def parse_cookie_string(cookie_str: str) -> List[Dict[str, str]]:
     cookies: List[Dict[str, str]] = []
     for part in cookie_str.split(";"):
@@ -662,13 +702,14 @@ def try_password_login(
     context,
     username: str,
     password: str,
-    solver: Optional[YesCaptchaSolver],
+    turnstile_solver: Optional[YesCaptchaSolver],
+    hcaptcha_solver: Optional[YesCaptchaSolver],
 ) -> Tuple[bool, Dict[str, object]]:
     state = navigate_and_capture(page, LOGIN_URL, "password-login")
     user_agent = page.evaluate("() => navigator.userAgent")
 
     try:
-        solve_turnstile_if_needed(page, user_agent, solver)
+        solve_turnstile_if_needed(page, user_agent, turnstile_solver)
         wait_for_settle(2)
     except Exception as exc:
         print(f"[turnstile] solve failed: {exc}", flush=True)
@@ -730,7 +771,7 @@ def try_password_login(
             if not post_state.get("has_hcaptcha"):
                 ok, validation_state = validate_login(page, context)
                 return ok, validation_state or post_state
-            hcaptcha_token = solve_hcaptcha_if_needed(page, user_agent, solver)
+            hcaptcha_token = solve_hcaptcha_if_needed(page, user_agent, hcaptcha_solver)
             wait_for_settle(2)
             csrf_info = fetch_csrf_token_from_linuxdo(page)
             csrf_token = str(csrf_info.get("token") or get_csrf_token(page))
@@ -811,15 +852,7 @@ def main() -> int:
         or env_str("LINUXDO_YESCAPTCHA_CLIENT_KEY")
         or env_str("YESCAPTCHA_CLIENT_KEY")
     )
-    solver_api_base = (
-        env_str("LINUXDO_YESCAPTCHA_API_BASE_URL")
-        or env_str("YESCAPTCHA_API_BASE_URL")
-        or YESCAPTCHA_API_BASE_URL
-    )
-    solver_advanced = env_str("LINUXDO_YESCAPTCHA_ADVANCED", "").lower() in {"1", "true", "yes", "on"}
-    solver_max_retries = env_int("LINUXDO_YESCAPTCHA_MAX_RETRIES", env_int("YESCAPTCHA_MAX_RETRIES", 20))
-    solver_retry_interval = env_int("LINUXDO_YESCAPTCHA_RETRY_INTERVAL", env_int("YESCAPTCHA_RETRY_INTERVAL", 3))
-    solver_timeout = env_int("LINUXDO_YESCAPTCHA_TIMEOUT", env_int("YESCAPTCHA_TIMEOUT", 60))
+    solver_settings = load_solver_settings()
 
     if not cookie_str and not (username and password):
         print("Need LINUXDO_COOKIES or LINUXDO_USERNAME/LINUXDO_PASSWORD", file=sys.stderr)
@@ -850,15 +883,24 @@ def main() -> int:
         context = launch_context(**launch_kwargs)
 
     page = context.new_page()
-    solver = None
+    turnstile_solver = None
+    hcaptcha_solver = None
     if solver_key:
-        solver = YesCaptchaSolver(
+        turnstile_solver = YesCaptchaSolver(
             client_key=solver_key,
-            api_base_url=solver_api_base,
-            max_retries=solver_max_retries,
-            retry_interval=solver_retry_interval,
-            timeout=solver_timeout,
-            advanced=solver_advanced,
+            api_base_url=str(solver_settings["api_base_url"]),
+            max_retries=int(solver_settings["turnstile"]["max_retries"]),
+            retry_interval=int(solver_settings["turnstile"]["retry_interval"]),
+            timeout=int(solver_settings["turnstile"]["timeout"]),
+            advanced=bool(solver_settings["advanced"]),
+        )
+        hcaptcha_solver = YesCaptchaSolver(
+            client_key=solver_key,
+            api_base_url=str(solver_settings["api_base_url"]),
+            max_retries=int(solver_settings["hcaptcha"]["max_retries"]),
+            retry_interval=int(solver_settings["hcaptcha"]["retry_interval"]),
+            timeout=int(solver_settings["hcaptcha"]["timeout"]),
+            advanced=bool(solver_settings["advanced"]),
         )
     result = None
 
@@ -873,7 +915,14 @@ def main() -> int:
 
         if username and password:
             print("[flow] trying password login", flush=True)
-            ok, state = try_password_login(page, context, username, password, solver)
+            ok, state = try_password_login(
+                page,
+                context,
+                username,
+                password,
+                turnstile_solver,
+                hcaptcha_solver,
+            )
             result = build_result(ok, "password", state, args.screenshot, loaded_envs)
             if ok:
                 print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)

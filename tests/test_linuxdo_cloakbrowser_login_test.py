@@ -31,6 +31,35 @@ class CookieParsingTests(unittest.TestCase):
         )
 
 
+class SolverSettingsTests(unittest.TestCase):
+    def test_load_solver_settings_uses_linuxdo_hcaptcha_defaults(self):
+        with mock.patch.dict(MODULE.os.environ, {}, clear=True):
+            settings = MODULE.load_solver_settings()
+
+        self.assertEqual(settings["turnstile"]["max_retries"], 20)
+        self.assertEqual(settings["turnstile"]["retry_interval"], 3)
+        self.assertEqual(settings["turnstile"]["timeout"], 60)
+        self.assertEqual(settings["hcaptcha"]["max_retries"], 45)
+        self.assertEqual(settings["hcaptcha"]["retry_interval"], 4)
+        self.assertEqual(settings["hcaptcha"]["timeout"], 600)
+
+    def test_load_solver_settings_allows_linuxdo_hcaptcha_overrides(self):
+        with mock.patch.dict(
+            MODULE.os.environ,
+            {
+                "LINUXDO_YESCAPTCHA_HCAPTCHA_MAX_RETRIES": "9",
+                "LINUXDO_YESCAPTCHA_HCAPTCHA_RETRY_INTERVAL": "5",
+                "LINUXDO_YESCAPTCHA_HCAPTCHA_TIMEOUT": "120",
+            },
+            clear=True,
+        ):
+            settings = MODULE.load_solver_settings()
+
+        self.assertEqual(settings["hcaptcha"]["max_retries"], 9)
+        self.assertEqual(settings["hcaptcha"]["retry_interval"], 5)
+        self.assertEqual(settings["hcaptcha"]["timeout"], 120)
+
+
 class HCaptchaCheckboxTests(unittest.TestCase):
     def test_hcaptcha_checkbox_looks_solved_when_aria_checked_true(self):
         frame = mock.Mock()

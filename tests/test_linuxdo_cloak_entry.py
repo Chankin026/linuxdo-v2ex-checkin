@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import pathlib
 import sys
 import types
@@ -75,6 +76,39 @@ def build_main_stub_modules():
     }
 
 
+def build_linuxdo_stub_modules():
+    logger = mock.Mock()
+
+    bs4 = types.ModuleType("bs4")
+    bs4.BeautifulSoup = object
+
+    curl_cffi = types.ModuleType("curl_cffi")
+    curl_cffi.requests = types.SimpleNamespace(
+        Session=mock.Mock,
+        request=mock.Mock(),
+        get=mock.Mock(),
+        post=mock.Mock(),
+    )
+
+    curl_cffi_const = types.ModuleType("curl_cffi.const")
+    curl_cffi_const.CurlIpResolve = types.SimpleNamespace(V4="V4")
+    curl_cffi_const.CurlOpt = types.SimpleNamespace(IPRESOLVE="IPRESOLVE")
+
+    loguru = types.ModuleType("loguru")
+    loguru.logger = logger
+
+    notify = types.ModuleType("notify")
+    notify.NotificationManager = object
+
+    return {
+        "bs4": bs4,
+        "curl_cffi": curl_cffi,
+        "curl_cffi.const": curl_cffi_const,
+        "loguru": loguru,
+        "notify": notify,
+    }
+
+
 class LinuxDoCloakDependencyTests(unittest.TestCase):
     def test_load_cloakbrowser_wraps_missing_dependency(self):
         module = load_module("linuxdo_cloak_under_test", LINUXDO_CLOAK_PATH)
@@ -88,6 +122,22 @@ class LinuxDoCloakDependencyTests(unittest.TestCase):
                 module.load_cloakbrowser()
 
         self.assertIn("pip install cloakbrowser", str(ctx.exception))
+
+    def test_hcaptcha_defaults_apply_without_env_overrides(self):
+        with (
+            mock.patch.dict(os.environ, {}, clear=True),
+            mock.patch("os.path.isfile", return_value=False),
+            mock.patch("os.path.exists", return_value=False),
+        ):
+            module = load_module(
+                "linuxdo_cloak_hcaptcha_defaults_under_test",
+                LINUXDO_CLOAK_PATH,
+                stub_modules=build_linuxdo_stub_modules(),
+            )
+
+        self.assertEqual(module.YESCAPTCHA_HCAPTCHA_MAX_RETRIES, 45)
+        self.assertEqual(module.YESCAPTCHA_HCAPTCHA_RETRY_INTERVAL, 4)
+        self.assertEqual(module.YESCAPTCHA_HCAPTCHA_TIMEOUT, 600)
 
 
 class MainLinuxDoEntryTests(unittest.TestCase):

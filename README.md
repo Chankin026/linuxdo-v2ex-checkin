@@ -100,11 +100,15 @@ Windows 下请自行替换为对应的虚拟环境命令。
 | `CLIENTT_KEY` | 通用 YesCaptcha key | LinuxDo / NodeSeek 账号密码登录共用 |
 | `LINUXDO_YESCAPTCHA_API_BASE_URL` | YesCaptcha 接口地址 | 默认 `https://api.yescaptcha.com` |
 | `LINUXDO_YESCAPTCHA_ADVANCED` | YesCaptcha 高级模式 | 可选，默认关闭 |
+| `LINUXDO_YESCAPTCHA_HCAPTCHA_MAX_RETRIES` | LinuxDo hCaptcha 最大轮询次数 | 可选，默认 `45` |
+| `LINUXDO_YESCAPTCHA_HCAPTCHA_RETRY_INTERVAL` | LinuxDo hCaptcha 轮询间隔（秒） | 可选，默认 `4` |
+| `LINUXDO_YESCAPTCHA_HCAPTCHA_TIMEOUT` | LinuxDo hCaptcha 单次请求超时（秒） | 可选，默认 `600` |
 
 说明：
 
 - 如果同时配置了 `LINUXDO_COOKIES` 和账号密码，会优先使用 Cookie
 - VPS / 本地下，Cookie 失效后会尝试账号密码登录
+- LinuxDo 的 hCaptcha 默认会按 `45` 次重试、每次间隔 `4` 秒、单次请求超时 `600` 秒执行，不配置也会生效
 - LinuxDo 浏览器固定使用有头模式；在 VPS 上如果 `DISPLAY` 为空，`deploy/vps/run.sh` 会自动使用 `xvfb-run`
 
 ### V2EX
