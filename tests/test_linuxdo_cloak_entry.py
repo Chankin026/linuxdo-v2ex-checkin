@@ -91,6 +91,18 @@ class LinuxDoCloakDependencyTests(unittest.TestCase):
 
 
 class MainLinuxDoEntryTests(unittest.TestCase):
+    def test_main_import_does_not_require_drissionpage(self):
+        stub_modules = build_main_stub_modules()
+        stub_modules.pop("DrissionPage")
+
+        module = load_module(
+            "main_without_drissionpage_under_test",
+            MAIN_PATH,
+            stub_modules=stub_modules,
+        )
+
+        self.assertTrue(hasattr(module, "run_configured_tasks"))
+
     def test_run_configured_tasks_uses_linuxdo_cloak_entrypoint(self):
         module = load_module(
             "main_linuxdo_entry_under_test",
