@@ -321,6 +321,48 @@ class MainNodeSeekEmailConfigTests(unittest.TestCase):
         self.assertEqual(config["email_imap_username"], "")
         self.assertEqual(config["email_imap_password"], "mail-pass")
 
+    def test_multiple_accounts_wait_between_runs(self):
+        env = {
+            "NODESEEK_USERNAME_1": "first",
+            "NODESEEK_PASSWORD_1": "secret-1",
+            "NODESEEK_USERNAME_2": "second",
+            "NODESEEK_PASSWORD_2": "secret-2",
+            "NODESEEK_ACCOUNT_DELAY_SECONDS": "123",
+        }
+        with (
+            mock.patch.dict(os.environ, env, clear=True),
+            mock.patch("os.path.exists", return_value=False),
+        ):
+            module = load_module(
+                "main_nodeseek_account_delay_under_test",
+                MAIN_PATH,
+                stub_modules=build_main_stub_modules(),
+            )
+
+            ran_accounts = []
+
+            class CapturingMission:
+                def __init__(self, *args, **kwargs):
+                    self.account_name = kwargs["account_name"]
+
+                def run(self):
+                    ran_accounts.append(self.account_name)
+
+            module.NodeSeekDailyMission = CapturingMission
+            module.V2EX_ENABLED = False
+            module.V2EX_COOKIE = ""
+            module.XIAOHEIHE_ENABLED = False
+            module.XIAOHEIHE_COOKIE = ""
+            module.COOKIES = ""
+            module.USERNAME = ""
+            module.PASSWORD = ""
+            module.time.sleep = mock.Mock()
+
+            module.run_configured_tasks()
+
+        self.assertEqual(ran_accounts, ["first", "second"])
+        module.time.sleep.assert_called_once_with(123)
+
 
 class NodeSeekBrowserEmailVerificationTests(unittest.TestCase):
     def test_browser_login_prefers_browser_turnstile_token_without_solver(self):

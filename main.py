@@ -6,6 +6,7 @@ new Env("Linux.Do 签到")
 import importlib
 import os
 import re
+import time
 from typing import Dict, List, Optional, Set
 
 from loguru import logger
@@ -170,6 +171,7 @@ NODESEEK_IMPERSONATE = (
     or env_str("NS_IMPERSONATE")
     or DEFAULT_IMPERSONATE
 )
+NODESEEK_ACCOUNT_DELAY_SECONDS = env_int("NODESEEK_ACCOUNT_DELAY_SECONDS", 300)
 
 XIAOHEIHE_COOKIE = env_str("XIAOHEIHE_COOKIE") or env_str("XIAOHEIHE_COOKIES")
 XIAOHEIHE_ENABLED = env_bool("XIAOHEIHE_ENABLED", bool(XIAOHEIHE_COOKIE))
@@ -482,7 +484,14 @@ def run_configured_tasks() -> None:
 
     if has_nodeseek_credentials:
         logger.info(f"Configured {len(nodeseek_accounts)} NodeSeek account(s)")
-        for account in nodeseek_accounts:
+        for position, account in enumerate(nodeseek_accounts):
+            if position > 0 and NODESEEK_ACCOUNT_DELAY_SECONDS > 0:
+                logger.info(
+                    "Waiting "
+                    f"{NODESEEK_ACCOUNT_DELAY_SECONDS}s before next NodeSeek account "
+                    "to reduce same-IP rate limiting"
+                )
+                time.sleep(NODESEEK_ACCOUNT_DELAY_SECONDS)
             NodeSeekDailyMission(
                 cookie_str=account["cookie_str"],
                 username=account["username"],

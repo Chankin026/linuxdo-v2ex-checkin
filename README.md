@@ -153,6 +153,7 @@ Windows 下请自行替换为对应的虚拟环境命令。
 | `NODESEEK_YESCAPTCHA_ADVANCED` | YesCaptcha 高级模式 | 可选 |
 | `NODESEEK_RANDOM` | 签到接口是否附带随机参数 | 默认 `true` |
 | `NODESEEK_IMPERSONATE` | 请求指纹 | 默认 `chrome136` |
+| `NODESEEK_ACCOUNT_DELAY_SECONDS` | 多账号之间的等待秒数 | 默认 `300`，可设为 `0` 关闭 |
 
 单账号配置：
 
