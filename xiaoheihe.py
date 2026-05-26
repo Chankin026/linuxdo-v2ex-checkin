@@ -1,6 +1,7 @@
 import json
 import os
 import random
+import re
 import time
 from typing import Any, Dict, Mapping, Optional, Tuple
 
@@ -367,12 +368,26 @@ class XiaoHeiHeDailyMission:
     def get_display_name(self) -> str:
         return self.account_name or "unknown"
 
+    @staticmethod
+    def format_reward_summary(detail: str) -> str:
+        text = str(detail or "")
+        rewards = []
+        coin_match = re.search(r"H币\+\s*([^\s|,，]+)", text)
+        exp_match = re.search(r"exp\+\s*([^\s|,，]+)", text, re.IGNORECASE)
+        if coin_match:
+            rewards.append(f"H币+{coin_match.group(1)}")
+        if exp_match:
+            rewards.append(f"exp+{exp_match.group(1)}")
+        if rewards:
+            return ", ".join(rewards)
+        return "no reward parsed"
+
     def send_success_notification(self, detail: str) -> None:
         lines = [
             "✅ Xiaoheihe daily mission completed",
             f"Account: {self.get_display_name()}",
+            f"Reward: {self.format_reward_summary(detail)}",
             f"Result: {detail}",
-            f"Request mode: {self.get_request_mode_label()}",
         ]
         self.notifier.send_all("Xiaoheihe", "\n".join(lines))
 
