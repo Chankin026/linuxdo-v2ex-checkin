@@ -579,6 +579,67 @@ class NodeSeekDailyMission:
             waited += 2
         return False
 
+    @staticmethod
+    def _read_browser_turnstile_token(browser) -> str:
+        js_code = (
+            "return (() => {"
+            "  const values = [];"
+            "  const selectors = ["
+            "    'input[name=\"cf-turnstile-response\"]',"
+            "    'textarea[name=\"cf-turnstile-response\"]',"
+            "    '[name=\"cf-turnstile-response\"]',"
+            "    '#captcha-container input[type=\"hidden\"]',"
+            "    '#captcha-container textarea',"
+            "  ];"
+            "  for (const selector of selectors) {"
+            "    for (const el of document.querySelectorAll(selector)) {"
+            "      if (el && el.value) values.push(el.value);"
+            "    }"
+            "  }"
+            "  if (window.turnstile && typeof window.turnstile.getResponse === 'function') {"
+            "    try { values.push(window.turnstile.getResponse()); } catch (e) {}"
+            "    for (const el of document.querySelectorAll('[id^=\"cf-chl-widget-\"], [data-sitekey], .cf-turnstile')) {"
+            "      try { if (el.id) values.push(window.turnstile.getResponse(el.id)); } catch (e) {}"
+            "    }"
+            "  }"
+            "  for (const value of values) {"
+            "    if (typeof value === 'string' && value.trim().length > 10) return value.trim();"
+            "  }"
+            "  return '';"
+            "})()"
+        )
+        try:
+            return str(browser.run_js(js_code) or "").strip()
+        except Exception as e:
+            logger.debug(f"Unable to read browser Turnstile token: {e}")
+            return ""
+
+    @classmethod
+    def _wait_for_browser_turnstile_token(cls, browser, max_wait: int = 20) -> str:
+        import time as _time
+
+        waited = 0
+        while waited <= max_wait:
+            token = cls._read_browser_turnstile_token(browser)
+            if token:
+                return token
+            _time.sleep(1)
+            waited += 1
+        return ""
+
+    def _sync_browser_user_agent(self, browser) -> str:
+        try:
+            user_agent = str(
+                browser.run_js("return navigator.userAgent || ''") or ""
+            ).strip()
+        except Exception as e:
+            logger.debug(f"Unable to read browser user agent: {e}")
+            return self.session.headers.get("User-Agent", "")
+
+        if user_agent:
+            self.session.headers["User-Agent"] = user_agent
+        return user_agent or self.session.headers.get("User-Agent", "")
+
     # ── Browser-based attendance (DrissionPage + real Chromium) ──────────
 
     def _attendance_via_browser(self) -> Tuple[bool, str]:
@@ -696,8 +757,6 @@ class NodeSeekDailyMission:
     def _browser_login(self, browser) -> Tuple[bool, str]:
         if not self.username or not self.password:
             return False, "No username/password for browser login"
-        if self.solver_type != "yescaptcha" or not self.yescaptcha_client_key:
-            return False, "YesCaptcha not configured for browser login"
 
         import json as _json
 
@@ -706,27 +765,41 @@ class NodeSeekDailyMission:
         if not self._wait_for_cloudflare(browser):
             return False, "Browser stuck on Cloudflare at sign-in page"
         browser.wait(3)
+        browser_user_agent = self._sync_browser_user_agent(browser)
 
         # Extract turnstile sitekey from page
         sitekey = browser.run_js(
             "return document.querySelector('[data-sitekey]')?.getAttribute('data-sitekey') || ''"
         ) or NODESEEK_TURNSTILE_SITEKEY
 
-        logger.info(f"Solving NodeSeek Turnstile (sitekey={sitekey}) via YesCaptcha...")
-        try:
-            solver = YesCaptchaSolver(
-                api_base_url=self.yescaptcha_api_base_url,
-                client_key=self.yescaptcha_client_key,
-                advanced=self.yescaptcha_advanced,
+        token = self._wait_for_browser_turnstile_token(browser)
+        if token:
+            logger.info(
+                "Using browser-generated NodeSeek login Turnstile token "
+                f"for {self.get_account_display_name()}"
             )
-            token = solver.solve(
-                url=NODESEEK_SIGNIN_PAGE_URL,
-                sitekey=sitekey,
-                user_agent=self.session.headers.get("User-Agent"),
-                verbose=False,
-            )
-        except YesCaptchaSolverError as e:
-            return False, f"Browser login YesCaptcha failed: {e}"
+        else:
+            if self.solver_type != "yescaptcha" or not self.yescaptcha_client_key:
+                return False, "YesCaptcha not configured for browser login"
+
+            logger.info(f"Solving NodeSeek Turnstile (sitekey={sitekey}) via YesCaptcha...")
+            try:
+                solver = YesCaptchaSolver(
+                    api_base_url=self.yescaptcha_api_base_url,
+                    client_key=self.yescaptcha_client_key,
+                    advanced=self.yescaptcha_advanced,
+                )
+                token = solver.solve(
+                    url=NODESEEK_SIGNIN_PAGE_URL,
+                    sitekey=sitekey,
+                    user_agent=browser_user_agent,
+                    verbose=False,
+                )
+            except YesCaptchaSolverError as e:
+                return False, f"Browser login YesCaptcha failed: {e}"
+
+        if not token:
+            return False, "NodeSeek login Turnstile token is empty"
 
         login_started_at = datetime.now(timezone.utc)
 
@@ -812,29 +885,37 @@ class NodeSeekDailyMission:
         if not self._wait_for_cloudflare(browser):
             return False, "Browser stuck on Cloudflare at email sign-in page"
         browser.wait(3)
+        browser_user_agent = self._sync_browser_user_agent(browser)
 
         sitekey = browser.run_js(
             "return document.querySelector('[data-sitekey]')?.getAttribute('data-sitekey') || ''"
         ) or NODESEEK_TURNSTILE_SITEKEY
 
-        logger.info(
-            "Solving NodeSeek email Turnstile "
-            f"(sitekey={sitekey}) via YesCaptcha..."
-        )
-        try:
-            solver = YesCaptchaSolver(
-                api_base_url=self.yescaptcha_api_base_url,
-                client_key=self.yescaptcha_client_key,
-                advanced=self.yescaptcha_advanced,
+        email_token = self._wait_for_browser_turnstile_token(browser)
+        if email_token:
+            logger.info(
+                "Using browser-generated NodeSeek email Turnstile token "
+                f"for {self.get_account_display_name()}"
             )
-            email_token = solver.solve(
-                url=email_page_url,
-                sitekey=sitekey,
-                user_agent=self.session.headers.get("User-Agent"),
-                verbose=False,
+        else:
+            logger.info(
+                "Solving NodeSeek email Turnstile "
+                f"(sitekey={sitekey}) via YesCaptcha..."
             )
-        except YesCaptchaSolverError as e:
-            return False, f"Browser email verification YesCaptcha failed: {e}"
+            try:
+                solver = YesCaptchaSolver(
+                    api_base_url=self.yescaptcha_api_base_url,
+                    client_key=self.yescaptcha_client_key,
+                    advanced=self.yescaptcha_advanced,
+                )
+                email_token = solver.solve(
+                    url=email_page_url,
+                    sitekey=sitekey,
+                    user_agent=browser_user_agent,
+                    verbose=False,
+                )
+            except YesCaptchaSolverError as e:
+                return False, f"Browser email verification YesCaptcha failed: {e}"
 
         email_js = self._json_for_js(email_address)
         token_js = self._json_for_js(email_token)

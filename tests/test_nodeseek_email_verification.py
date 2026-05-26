@@ -309,6 +309,59 @@ class MainNodeSeekEmailConfigTests(unittest.TestCase):
 
 
 class NodeSeekBrowserEmailVerificationTests(unittest.TestCase):
+    def test_browser_login_prefers_browser_turnstile_token_without_solver(self):
+        module = load_module(
+            "nodeseek_browser_page_token_login_under_test",
+            NODESEEK_PATH,
+            stub_modules=build_nodeseek_stub_modules(),
+        )
+
+        class FakeBrowser:
+            title = "NodeSeek"
+            url = "https://www.nodeseek.com/signIn.html"
+
+            def __init__(self):
+                self.loaded_urls = []
+                self.login_request_script = ""
+
+            def get(self, url, timeout=30):
+                self.loaded_urls.append(url)
+                self.url = url
+
+            def wait(self, seconds):
+                return None
+
+            def run_js(self, js_code):
+                if "navigator.userAgent" in js_code:
+                    return "Fake Browser UA"
+                if "querySelector('[data-sitekey]')" in js_code:
+                    return ""
+                if "turnstile.getResponse" in js_code:
+                    return "page-login-token"
+                if "/api/account/signIn" in js_code:
+                    self.login_request_script = js_code
+                    return json.dumps(
+                        {
+                            "status": 200,
+                            "body": json.dumps(
+                                {"success": True, "message": "login ok"}
+                            ),
+                        }
+                    )
+                raise AssertionError(f"Unexpected JS: {js_code}")
+
+        mission = module.NodeSeekDailyMission(
+            username="neal",
+            password="password",
+        )
+        browser = FakeBrowser()
+
+        ok, detail = mission._browser_login(browser)
+
+        self.assertTrue(ok, detail)
+        self.assertIn("page-login-token", browser.login_request_script)
+        self.assertNotIn("turnstile-token", browser.login_request_script)
+
     def test_browser_login_completes_email_verification_when_required(self):
         module = load_module(
             "nodeseek_email_browser_under_test",
@@ -341,8 +394,14 @@ class NodeSeekBrowserEmailVerificationTests(unittest.TestCase):
 
             def run_js(self, js_code):
                 self.scripts.append(js_code)
+                if "navigator.userAgent" in js_code:
+                    return "Fake Browser UA"
                 if "querySelector('[data-sitekey]')" in js_code:
                     return ""
+                if "turnstile.getResponse" in js_code:
+                    if "emailSignIn.html" in self.url:
+                        return "page-email-token"
+                    return "page-login-token"
                 if "/api/account/signIn" in js_code:
                     return json.dumps(
                         {
@@ -397,6 +456,146 @@ class NodeSeekBrowserEmailVerificationTests(unittest.TestCase):
         self.assertIn("version: 'v3'", all_js)
         self.assertIn("/api/account/emailSignIn", all_js)
         self.assertIn("654321", all_js)
+
+    def test_email_verification_prefers_browser_turnstile_token(self):
+        module = load_module(
+            "nodeseek_email_browser_page_token_under_test",
+            NODESEEK_PATH,
+            stub_modules=build_nodeseek_stub_modules(),
+        )
+
+        class FakeEmailCodeFetcher:
+            def wait_for_code(self, *, email_address, not_before=None):
+                return "654321"
+
+        class FakeBrowser:
+            title = "NodeSeek"
+            url = "https://www.nodeseek.com/signIn.html"
+
+            def __init__(self):
+                self.loaded_urls = []
+                self.email_request_script = ""
+
+            def get(self, url, timeout=30):
+                self.loaded_urls.append(url)
+                self.url = url
+
+            def wait(self, seconds):
+                return None
+
+            def run_js(self, js_code):
+                if "navigator.userAgent" in js_code:
+                    return "Fake Browser UA"
+                if "querySelector('[data-sitekey]')" in js_code:
+                    return ""
+                if "turnstile.getResponse" in js_code:
+                    if "emailSignIn.html" in self.url:
+                        return "page-email-token"
+                    return "page-login-token"
+                if "/api/account/signIn" in js_code:
+                    return json.dumps(
+                        {
+                            "status": 200,
+                            "body": json.dumps(
+                                {
+                                    "success": True,
+                                    "data": {
+                                        "url": "/emailSignIn.html?email=neal%40example.com"
+                                    },
+                                }
+                            ),
+                        }
+                    )
+                if "/api/email" in js_code:
+                    self.email_request_script = js_code
+                    return json.dumps(
+                        {
+                            "status": 200,
+                            "body": json.dumps({"success": True, "message": "sent"}),
+                        }
+                    )
+                if "/api/account/emailSignIn" in js_code:
+                    return json.dumps(
+                        {
+                            "status": 200,
+                            "body": json.dumps({"success": True, "message": "ok"}),
+                        }
+                    )
+                raise AssertionError(f"Unexpected JS: {js_code}")
+
+        mission = module.NodeSeekDailyMission(
+            username="neal",
+            password="password",
+            solver_type="yescaptcha",
+            yescaptcha_client_key="client-key",
+            email_code_fetcher=FakeEmailCodeFetcher(),
+        )
+
+        browser = FakeBrowser()
+        ok, detail = mission._browser_login(browser)
+
+        self.assertTrue(ok, detail)
+        self.assertIn("page-email-token", browser.email_request_script)
+        self.assertNotIn("turnstile-token", browser.email_request_script)
+
+    def test_yescaptcha_fallback_uses_browser_user_agent(self):
+        module = load_module(
+            "nodeseek_yescaptcha_browser_ua_under_test",
+            NODESEEK_PATH,
+            stub_modules=build_nodeseek_stub_modules(),
+        )
+
+        captured_user_agents = []
+
+        class CapturingSolver:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def solve(self, *args, **kwargs):
+                captured_user_agents.append(kwargs.get("user_agent"))
+                return "solver-token"
+
+        module.YesCaptchaSolver = CapturingSolver
+
+        class FakeBrowser:
+            title = "NodeSeek"
+            url = "https://www.nodeseek.com/signIn.html"
+
+            def get(self, url, timeout=30):
+                self.url = url
+
+            def wait(self, seconds):
+                return None
+
+            def run_js(self, js_code):
+                if "navigator.userAgent" in js_code:
+                    return "Real Browser UA"
+                if "querySelector('[data-sitekey]')" in js_code:
+                    return ""
+                if "turnstile.getResponse" in js_code:
+                    return ""
+                if "/api/account/signIn" in js_code:
+                    return json.dumps(
+                        {
+                            "status": 200,
+                            "body": json.dumps(
+                                {"success": True, "message": "login ok"}
+                            ),
+                        }
+                    )
+                raise AssertionError(f"Unexpected JS: {js_code}")
+
+        mission = module.NodeSeekDailyMission(
+            username="neal",
+            password="password",
+            solver_type="yescaptcha",
+            yescaptcha_client_key="client-key",
+        )
+
+        ok, detail = mission._browser_login(FakeBrowser())
+
+        self.assertTrue(ok, detail)
+        self.assertEqual(captured_user_agents, ["Real Browser UA"])
 
     def test_email_fetcher_infers_missing_host_and_username(self):
         module = load_module(
