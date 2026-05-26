@@ -167,6 +167,20 @@ class NodeSeekEmailCodeParsingTests(unittest.TestCase):
             "a1b2c3d4e5f60718293a4b5c",
         )
 
+    def test_extract_verification_code_ignores_brand_before_keyword(self):
+        from nodeseek_email import extract_verification_code
+
+        text = (
+            "邮箱动态验证登录\n"
+            "nodeseek邮箱动态验证登录，你的验证码是"
+            "823449fc2f44cdbca2e11df1，不要告诉他人"
+        )
+
+        self.assertEqual(
+            extract_verification_code(text),
+            "823449fc2f44cdbca2e11df1",
+        )
+
     def test_find_latest_verification_code_ignores_stale_mail(self):
         from nodeseek_email import (
             EmailVerificationMessage,

@@ -144,9 +144,18 @@ def extract_verification_code(text: str) -> Optional[str]:
     if not text:
         return None
 
+    direct_patterns = [
+        r"(?:你的验证码是|您的验证码是|验证码是|驗證碼是|校验码是)\s*([A-Za-z0-9]{4,64})",
+        r"(?:验证码|驗證碼|校验码|validation\s*code|verification\s*code|login\s*code)\s*[:：]\s*([A-Za-z0-9]{4,64})",
+    ]
+    for pattern in direct_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(1)
+
     keyword_pattern = re.compile(
-        r"(?:验证码|驗證碼|校验码|动态验证|validation\s*code|verification\s*code|"
-        r"login\s*code|code)[^A-Za-z0-9]{0,30}([A-Za-z0-9]{4,64})",
+        r"(?:验证码|驗證碼|校验码|validation\s*code|verification\s*code|"
+        r"login\s*code|code)[^A-Za-z0-9\r\n]{0,30}([A-Za-z0-9]{4,64})",
         re.IGNORECASE,
     )
     match = keyword_pattern.search(text)
