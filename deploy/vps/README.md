@@ -111,13 +111,17 @@ NODESEEK_NAME=main
 NODESEEK_COOKIE=nodepay_session=xxx
 NODESEEK_USERNAME=your_username
 NODESEEK_PASSWORD=your_password
+NODESEEK_EMAIL_IMAP_PASSWORD=your_imap_app_password
 ```
 
 NodeSeek 会：
 
 1. 先尝试 Cookie
 2. Cookie 无效时，使用账号密码 + YesCaptcha 登录
-3. 把刷新后的 Cookie 回写到 `/etc/linuxdo-v2ex-checkin.env`
+3. 如果 NodeSeek 要求邮箱动态验证，会自动读取登录返回的邮箱地址，并推断常见邮箱的 IMAP 服务器和登录账号
+4. 把刷新后的 Cookie 回写到 `/etc/linuxdo-v2ex-checkin.env`
+
+通常只需要补 `NODESEEK_EMAIL_IMAP_PASSWORD`。只有自动推断失败时，再补 `NODESEEK_EMAIL`、`NODESEEK_EMAIL_IMAP_HOST` 或 `NODESEEK_EMAIL_IMAP_USERNAME`。
 
 双账号示例：
 
@@ -130,6 +134,7 @@ NODESEEK_NAME_1=main
 NODESEEK_COOKIE_1=nodepay_session=account1_cookie
 NODESEEK_USERNAME_1=account1_username
 NODESEEK_PASSWORD_1=account1_password
+NODESEEK_EMAIL_IMAP_PASSWORD_1=account1_imap_app_password
 
 NODESEEK_NAME_2=backup
 NODESEEK_COOKIE_2=nodepay_session=account2_cookie

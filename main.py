@@ -144,6 +144,14 @@ NODESEEK_NAME = env_str("NODESEEK_NAME")
 NODESEEK_COOKIE = env_str("NODESEEK_COOKIE") or env_str("NS_COOKIE")
 NODESEEK_USERNAME = env_str("NODESEEK_USERNAME")
 NODESEEK_PASSWORD = env_str("NODESEEK_PASSWORD")
+NODESEEK_EMAIL = env_str("NODESEEK_EMAIL")
+NODESEEK_EMAIL_IMAP_HOST = env_str("NODESEEK_EMAIL_IMAP_HOST")
+NODESEEK_EMAIL_IMAP_PORT = env_int("NODESEEK_EMAIL_IMAP_PORT", 993)
+NODESEEK_EMAIL_IMAP_USERNAME = env_str("NODESEEK_EMAIL_IMAP_USERNAME")
+NODESEEK_EMAIL_IMAP_PASSWORD = env_str("NODESEEK_EMAIL_IMAP_PASSWORD")
+NODESEEK_EMAIL_IMAP_MAILBOX = env_str("NODESEEK_EMAIL_IMAP_MAILBOX", "INBOX")
+NODESEEK_EMAIL_CODE_TIMEOUT = env_int("NODESEEK_EMAIL_CODE_TIMEOUT", 300)
+NODESEEK_EMAIL_CODE_POLL_INTERVAL = env_int("NODESEEK_EMAIL_CODE_POLL_INTERVAL", 10)
 NODESEEK_RANDOM = env_bool("NODESEEK_RANDOM", env_bool("NS_RANDOM", True))
 NODESEEK_SOLVER_TYPE = (
     env_str("NODESEEK_SOLVER_TYPE") or DEFAULT_SOLVER_TYPE or ""
@@ -178,7 +186,9 @@ XIAOHEIHE_IMPERSONATE = (
 
 NODESEEK_INDEXED_ENV_PATTERN = re.compile(
     r"^(?:"
-    r"NODESEEK_(?:COOKIE|USERNAME|PASSWORD|NAME|RANDOM|IMPERSONATE|SOLVER_TYPE|"
+    r"NODESEEK_(?:COOKIE|USERNAME|PASSWORD|NAME|EMAIL|EMAIL_IMAP_HOST|"
+    r"EMAIL_IMAP_PORT|EMAIL_IMAP_USERNAME|EMAIL_IMAP_PASSWORD|EMAIL_IMAP_MAILBOX|"
+    r"EMAIL_CODE_TIMEOUT|EMAIL_CODE_POLL_INTERVAL|RANDOM|IMPERSONATE|SOLVER_TYPE|"
     r"YESCAPTCHA_API_BASE_URL|YESCAPTCHA_ADVANCED)"
     r"|NS_(?:COOKIE|RANDOM|IMPERSONATE)"
     r")_(\d+)$"
@@ -223,6 +233,27 @@ def indexed_env_bool(
     return default
 
 
+def indexed_env_int(
+    base_name: str,
+    index: Optional[int] = None,
+    default: int = 0,
+    aliases: Optional[List[str]] = None,
+) -> int:
+    for name in [base_name] + (aliases or []):
+        value = env_str(indexed_env_name(name, index))
+        if not value:
+            continue
+        try:
+            return int(value)
+        except ValueError:
+            logger.warning(
+                f"环境变量 {indexed_env_name(name, index)} 不是有效整数: "
+                f"{value!r}，将回退到 {default}"
+            )
+            return default
+    return default
+
+
 def indexed_env_name_with_value(
     base_name: str,
     index: Optional[int] = None,
@@ -247,9 +278,22 @@ def collect_nodeseek_account_indexes() -> List[int]:
 
 
 def build_nodeseek_account_config(index: Optional[int] = None) -> Optional[Dict[str, object]]:
-    cookie = indexed_env_str("NODESEEK_COOKIE", index, aliases=["NS_COOKIE"], default="")
-    username = indexed_env_str("NODESEEK_USERNAME", index, default="")
-    password = indexed_env_str("NODESEEK_PASSWORD", index, default="")
+    cookie = indexed_env_str(
+        "NODESEEK_COOKIE",
+        index,
+        aliases=["NS_COOKIE"],
+        default=NODESEEK_COOKIE if index is None else "",
+    )
+    username = indexed_env_str(
+        "NODESEEK_USERNAME",
+        index,
+        default=NODESEEK_USERNAME if index is None else "",
+    )
+    password = indexed_env_str(
+        "NODESEEK_PASSWORD",
+        index,
+        default=NODESEEK_PASSWORD if index is None else "",
+    )
 
     if not cookie and not (username and password):
         return None
@@ -283,6 +327,46 @@ def build_nodeseek_account_config(index: Optional[int] = None) -> Optional[Dict[
         ),
         "username": username,
         "password": password,
+        "email_address": indexed_env_str(
+            "NODESEEK_EMAIL",
+            index,
+            default=NODESEEK_EMAIL,
+        ),
+        "email_imap_host": indexed_env_str(
+            "NODESEEK_EMAIL_IMAP_HOST",
+            index,
+            default=NODESEEK_EMAIL_IMAP_HOST,
+        ),
+        "email_imap_port": indexed_env_int(
+            "NODESEEK_EMAIL_IMAP_PORT",
+            index,
+            default=NODESEEK_EMAIL_IMAP_PORT,
+        ),
+        "email_imap_username": indexed_env_str(
+            "NODESEEK_EMAIL_IMAP_USERNAME",
+            index,
+            default=NODESEEK_EMAIL_IMAP_USERNAME,
+        ),
+        "email_imap_password": indexed_env_str(
+            "NODESEEK_EMAIL_IMAP_PASSWORD",
+            index,
+            default=NODESEEK_EMAIL_IMAP_PASSWORD,
+        ),
+        "email_imap_mailbox": indexed_env_str(
+            "NODESEEK_EMAIL_IMAP_MAILBOX",
+            index,
+            default=NODESEEK_EMAIL_IMAP_MAILBOX,
+        ),
+        "email_code_timeout": indexed_env_int(
+            "NODESEEK_EMAIL_CODE_TIMEOUT",
+            index,
+            default=NODESEEK_EMAIL_CODE_TIMEOUT,
+        ),
+        "email_code_poll_interval": indexed_env_int(
+            "NODESEEK_EMAIL_CODE_POLL_INTERVAL",
+            index,
+            default=NODESEEK_EMAIL_CODE_POLL_INTERVAL,
+        ),
         "solver_type": solver_type,
         "yescaptcha_client_key": yescaptcha_client_key,
         "yescaptcha_api_base_url": indexed_env_str(
@@ -413,6 +497,14 @@ def run_configured_tasks() -> None:
                 impersonate=account["impersonate"],
                 cookie_env_var_name=account["cookie_env_var_name"],
                 account_name=account["account_name"],
+                email_address=account["email_address"],
+                email_imap_host=account["email_imap_host"],
+                email_imap_port=account["email_imap_port"],
+                email_imap_username=account["email_imap_username"],
+                email_imap_password=account["email_imap_password"],
+                email_imap_mailbox=account["email_imap_mailbox"],
+                email_code_timeout=account["email_code_timeout"],
+                email_code_poll_interval=account["email_code_poll_interval"],
             ).run()
     elif NODESEEK_ENABLED:
         logger.info("未配置 NodeSeek 登录信息，跳过 NodeSeek 每日签到")

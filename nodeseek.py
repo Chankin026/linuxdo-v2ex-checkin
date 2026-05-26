@@ -1,12 +1,14 @@
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from curl_cffi import requests
 from loguru import logger
 
 from captcha_solver import YesCaptchaSolver, YesCaptchaSolverError
+from nodeseek_email import ImapEmailCodeFetcher, infer_imap_host
 from notify import NotificationManager
 
 try:
@@ -38,6 +40,15 @@ class NodeSeekDailyMission:
         impersonate: str = "chrome136",
         cookie_env_var_name: str = "NODESEEK_COOKIE",
         account_name: str = "",
+        email_address: str = "",
+        email_imap_host: str = "",
+        email_imap_port: int = 993,
+        email_imap_username: str = "",
+        email_imap_password: str = "",
+        email_imap_mailbox: str = "INBOX",
+        email_code_timeout: int = 300,
+        email_code_poll_interval: int = 10,
+        email_code_fetcher=None,
     ):
         self.cookie_str = cookie_str.strip()
         self.username = username.strip()
@@ -51,6 +62,15 @@ class NodeSeekDailyMission:
         self.attendance_random = attendance_random
         self.cookie_env_var_name = cookie_env_var_name.strip() or "NODESEEK_COOKIE"
         self.account_name = account_name.strip()
+        self.email_address = email_address.strip()
+        self.email_imap_host = email_imap_host.strip()
+        self.email_imap_port = int(email_imap_port or 993)
+        self.email_imap_username = email_imap_username.strip()
+        self.email_imap_password = email_imap_password
+        self.email_imap_mailbox = email_imap_mailbox.strip() or "INBOX"
+        self.email_code_timeout = int(email_code_timeout or 300)
+        self.email_code_poll_interval = int(email_code_poll_interval or 10)
+        self.email_code_fetcher = email_code_fetcher
         self.impersonate_candidates = self.build_impersonate_candidates(impersonate)
         self.session = requests.Session()
         self.session.headers.update(
@@ -467,6 +487,85 @@ class NodeSeekDailyMission:
             except Exception:
                 return {}
 
+    def build_email_code_fetcher(self, email_address: str = ""):
+        if self.email_code_fetcher is not None:
+            return self.email_code_fetcher
+        email_address = (email_address or self.email_address).strip()
+        host = self.email_imap_host or infer_imap_host(email_address)
+        username = self.email_imap_username or email_address
+        if not (
+            host
+            and username
+            and self.email_imap_password
+        ):
+            return None
+        self.email_code_fetcher = ImapEmailCodeFetcher(
+            host=host,
+            port=self.email_imap_port,
+            username=username,
+            password=self.email_imap_password,
+            mailbox=self.email_imap_mailbox,
+            timeout=self.email_code_timeout,
+            poll_interval=self.email_code_poll_interval,
+        )
+        return self.email_code_fetcher
+
+    @staticmethod
+    def _json_for_js(value: str) -> str:
+        return json.dumps(value or "", ensure_ascii=False)
+
+    @staticmethod
+    def _extract_email_from_login_response(data: dict) -> str:
+        candidates = []
+        if isinstance(data, dict):
+            candidates.extend(
+                [
+                    data.get("email"),
+                    data.get("mail"),
+                    data.get("redirect"),
+                    data.get("url"),
+                    data.get("location"),
+                    data.get("message"),
+                    data.get("msg"),
+                ]
+            )
+            nested = data.get("data")
+            if isinstance(nested, dict):
+                candidates.extend(
+                    [
+                        nested.get("email"),
+                        nested.get("mail"),
+                        nested.get("redirect"),
+                        nested.get("url"),
+                        nested.get("location"),
+                    ]
+                )
+            elif isinstance(nested, str):
+                candidates.append(nested)
+
+        for candidate in candidates:
+            if not candidate:
+                continue
+            text = unquote(str(candidate))
+            parsed = urlparse(text)
+            query_email = parse_qs(parsed.query).get("email", [""])[0]
+            if query_email:
+                return query_email.strip()
+            match = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)
+            if match:
+                return match.group(0)
+        return ""
+
+    @staticmethod
+    def _login_response_requires_email_verification(data: dict) -> bool:
+        text = json.dumps(data, ensure_ascii=False).lower()
+        return (
+            bool(NodeSeekDailyMission._extract_email_from_login_response(data))
+            or "emailsignin" in text
+            or "邮箱" in text
+            or ("email" in text and ("verify" in text or "verification" in text))
+        )
+
     @staticmethod
     def _wait_for_cloudflare(browser, max_wait: int = 60) -> bool:
         import time as _time
@@ -601,7 +700,6 @@ class NodeSeekDailyMission:
             return False, "YesCaptcha not configured for browser login"
 
         import json as _json
-        from captcha_solver import YesCaptchaSolver, YesCaptchaSolverError
 
         # Navigate to sign-in page
         browser.get(NODESEEK_SIGNIN_PAGE_URL, timeout=30)
@@ -630,16 +728,18 @@ class NodeSeekDailyMission:
         except YesCaptchaSolverError as e:
             return False, f"Browser login YesCaptcha failed: {e}"
 
+        login_started_at = datetime.now(timezone.utc)
+
         # Submit login via browser JS fetch
-        escaped_username = self.username.replace("\\", "\\\\").replace("'", "\\'")
-        escaped_password = self.password.replace("\\", "\\\\").replace("'", "\\'")
-        escaped_token = token.replace("\\", "\\\\").replace("'", "\\'")
+        username_js = self._json_for_js(self.username)
+        password_js = self._json_for_js(self.password)
+        token_js = self._json_for_js(token)
         js_code = (
             "return (async () => {"
             "  const payload = JSON.stringify({"
-            "    username: '" + escaped_username + "',"
-            "    password: '" + escaped_password + "',"
-            "    token: '" + escaped_token + "',"
+            "    username: " + username_js + ","
+            "    password: " + password_js + ","
+            "    token: " + token_js + ","
             "    source: 'turnstile',"
             "  });"
             "  const resp = await fetch('/api/account/signIn', {"
@@ -661,11 +761,152 @@ class NodeSeekDailyMission:
         data = _json.loads(body_text) if body_text else {}
         message = str(data.get("message") or data.get("msg") or "").strip()
 
+        if (
+            result.get("status") == 200
+            and data.get("success") is True
+            and self._login_response_requires_email_verification(data)
+        ):
+            return self._browser_complete_email_signin(
+                browser=browser,
+                login_data=data,
+                not_before=login_started_at,
+            )
+
         if result.get("status") != 200 or data.get("success") is not True:
             return False, message or f"Browser login HTTP {result.get('status')}"
 
         logger.success(f"NodeSeek browser login succeeded for {self.get_account_display_name()}")
         return True, message or "Login succeeded via browser"
+
+    def _browser_complete_email_signin(
+        self,
+        browser,
+        login_data: dict,
+        not_before: datetime,
+    ) -> Tuple[bool, str]:
+        import json as _json
+
+        email_address = (
+            self.email_address
+            or self._extract_email_from_login_response(login_data)
+        ).strip()
+        if not email_address:
+            return False, "NodeSeek email verification required but email is unknown"
+
+        fetcher = self.build_email_code_fetcher(email_address)
+        if fetcher is None:
+            return (
+                False,
+                "NodeSeek email verification required but IMAP is not configured",
+            )
+
+        logger.info(
+            "NodeSeek email verification required for "
+            f"{self.get_account_display_name()} ({email_address})"
+        )
+
+        email_page_url = (
+            f"{NODESEEK_BASE_URL}/emailSignIn.html?email={quote(email_address)}"
+        )
+        browser.get(email_page_url, timeout=30)
+        if not self._wait_for_cloudflare(browser):
+            return False, "Browser stuck on Cloudflare at email sign-in page"
+        browser.wait(3)
+
+        sitekey = browser.run_js(
+            "return document.querySelector('[data-sitekey]')?.getAttribute('data-sitekey') || ''"
+        ) or NODESEEK_TURNSTILE_SITEKEY
+
+        logger.info(
+            "Solving NodeSeek email Turnstile "
+            f"(sitekey={sitekey}) via YesCaptcha..."
+        )
+        try:
+            solver = YesCaptchaSolver(
+                api_base_url=self.yescaptcha_api_base_url,
+                client_key=self.yescaptcha_client_key,
+                advanced=self.yescaptcha_advanced,
+            )
+            email_token = solver.solve(
+                url=email_page_url,
+                sitekey=sitekey,
+                user_agent=self.session.headers.get("User-Agent"),
+                verbose=False,
+            )
+        except YesCaptchaSolverError as e:
+            return False, f"Browser email verification YesCaptcha failed: {e}"
+
+        email_js = self._json_for_js(email_address)
+        token_js = self._json_for_js(email_token)
+        send_code_js = (
+            "return (async () => {"
+            "  const payload = JSON.stringify({"
+            "    email: " + email_js + ","
+            "    mode: 'totp',"
+            "    token: " + token_js + ","
+            "    source: 'turnstile',"
+            "    version: 'v3',"
+            "  });"
+            "  const resp = await fetch('/api/email', {"
+            "    method: 'POST',"
+            "    headers: { 'Content-Type': 'application/json;charset=UTF-8' },"
+            "    body: payload,"
+            "    credentials: 'include',"
+            "  });"
+            "  const text = await resp.text();"
+            "  return JSON.stringify({ status: resp.status, body: text });"
+            "})();"
+        )
+        result_json = browser.run_js(send_code_js)
+        if not result_json:
+            return False, "NodeSeek email code request returned no result"
+
+        result = _json.loads(result_json)
+        body_text = result.get("body", "")
+        data = _json.loads(body_text) if body_text else {}
+        message = str(data.get("message") or data.get("msg") or "").strip()
+        if result.get("status") != 200 or data.get("success") is not True:
+            return False, message or f"NodeSeek email code HTTP {result.get('status')}"
+
+        code = fetcher.wait_for_code(
+            email_address=email_address,
+            not_before=not_before,
+        )
+        if not code:
+            return False, "Timed out waiting for NodeSeek email verification code"
+
+        code_js = self._json_for_js(code)
+        verify_js = (
+            "return (async () => {"
+            "  const payload = JSON.stringify({"
+            "    email: " + email_js + ","
+            "    code: " + code_js + ","
+            "  });"
+            "  const resp = await fetch('/api/account/emailSignIn', {"
+            "    method: 'POST',"
+            "    headers: { 'Content-Type': 'application/json;charset=UTF-8' },"
+            "    body: payload,"
+            "    credentials: 'include',"
+            "  });"
+            "  const text = await resp.text();"
+            "  return JSON.stringify({ status: resp.status, body: text });"
+            "})();"
+        )
+        result_json = browser.run_js(verify_js)
+        if not result_json:
+            return False, "NodeSeek email sign-in returned no result"
+
+        result = _json.loads(result_json)
+        body_text = result.get("body", "")
+        data = _json.loads(body_text) if body_text else {}
+        message = str(data.get("message") or data.get("msg") or "").strip()
+        if result.get("status") != 200 or data.get("success") is not True:
+            return False, message or f"NodeSeek email sign-in HTTP {result.get('status')}"
+
+        logger.success(
+            f"NodeSeek email verification succeeded for {self.get_account_display_name()}"
+        )
+        return True, message or "Login succeeded via email verification"
 
     def _save_browser_cookies(self, browser) -> None:
         try:

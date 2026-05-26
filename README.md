@@ -162,6 +162,19 @@ Windows 下请自行替换为对应的虚拟环境命令。
 | `NODESEEK_COOKIE` | NodeSeek Cookie | 可单独使用 |
 | `NODESEEK_USERNAME` | NodeSeek 用户名 | 可和密码配对使用 |
 | `NODESEEK_PASSWORD` | NodeSeek 密码 | 可和用户名配对使用 |
+| `NODESEEK_EMAIL_IMAP_PASSWORD` | 邮箱 IMAP 授权码 | 触发邮箱验证时才需要，建议使用授权码 |
+
+邮箱验证的可选覆盖项：
+
+| 变量名 | 用途 | 说明 |
+| --- | --- | --- |
+| `NODESEEK_EMAIL` | NodeSeek 绑定邮箱 | 默认从登录返回的邮箱验证地址自动读取 |
+| `NODESEEK_EMAIL_IMAP_HOST` | 邮箱 IMAP 服务器 | 默认按邮箱域名推断，例如 `imap.qq.com` |
+| `NODESEEK_EMAIL_IMAP_PORT` | 邮箱 IMAP SSL 端口 | 默认 `993` |
+| `NODESEEK_EMAIL_IMAP_USERNAME` | 邮箱登录账号 | 默认等于 `NODESEEK_EMAIL` 或登录返回的邮箱 |
+| `NODESEEK_EMAIL_IMAP_MAILBOX` | 邮箱目录 | 默认 `INBOX` |
+| `NODESEEK_EMAIL_CODE_TIMEOUT` | 等待验证码秒数 | 默认 `300` |
+| `NODESEEK_EMAIL_CODE_POLL_INTERVAL` | 轮询邮箱间隔秒数 | 默认 `10` |
 
 多账号配置使用编号变量，例如：
 
@@ -170,6 +183,7 @@ NODESEEK_NAME_1=main
 NODESEEK_COOKIE_1=nodepay_session=account1_cookie
 NODESEEK_USERNAME_1=account1_username
 NODESEEK_PASSWORD_1=account1_password
+NODESEEK_EMAIL_IMAP_PASSWORD_1=account1_imap_app_password
 
 NODESEEK_NAME_2=backup
 NODESEEK_COOKIE_2=nodepay_session=account2_cookie
@@ -226,6 +240,7 @@ NODESEEK_NAME=main
 NODESEEK_COOKIE=nodepay_session=xxx
 NODESEEK_USERNAME=your_nodeseek_username
 NODESEEK_PASSWORD=your_nodeseek_password
+NODESEEK_EMAIL_IMAP_PASSWORD=your_imap_app_password
 
 TELEGRAM_BOT_TOKEN=123456:ABCDEF
 TELEGRAM_CHAT_ID=123456789
