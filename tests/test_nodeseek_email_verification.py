@@ -365,6 +365,73 @@ class MainNodeSeekEmailConfigTests(unittest.TestCase):
 
 
 class NodeSeekBrowserEmailVerificationTests(unittest.TestCase):
+    def test_browser_attendance_prefers_cookie_before_password_login(self):
+        module = load_module(
+            "nodeseek_cookie_first_browser_under_test",
+            NODESEEK_PATH,
+            stub_modules=build_nodeseek_stub_modules(),
+        )
+
+        class FakeCookieSetter:
+            def __init__(self, browser):
+                self.browser = browser
+
+            def cookies(self, cookies):
+                self.browser.events.append(("cookies", cookies))
+
+        class FakeBrowser:
+            title = "NodeSeek"
+            url = "https://www.nodeseek.com"
+
+            def __init__(self, *_args, **_kwargs):
+                self.events = []
+                self.set = FakeCookieSetter(self)
+
+            def get(self, url, timeout=30):
+                self.events.append(("get", url))
+                self.url = url
+
+            def cookies(self):
+                return mock.Mock(as_str=mock.Mock(return_value="fresh=1"))
+
+            def quit(self):
+                self.events.append(("quit", None))
+
+        fake_browser = FakeBrowser()
+        chrome_options = mock.Mock()
+        chrome_options.auto_port.return_value = chrome_options
+        chrome_options.headless.return_value = chrome_options
+        chrome_options.incognito.return_value = chrome_options
+        chrome_options.set_argument.return_value = chrome_options
+        chrome_options.set_user_agent.return_value = chrome_options
+
+        mission = module.NodeSeekDailyMission(
+            cookie_str="nodepay_session=cookie-session",
+            username="neal",
+            password="password",
+        )
+        mission._wait_for_cloudflare = mock.Mock(return_value=True)
+        mission._browser_login = mock.Mock(return_value=(True, "login ok"))
+        mission._browser_fetch_attendance = mock.Mock(return_value=(True, "cookie ok"))
+        mission._save_browser_cookies = mock.Mock()
+
+        drission_page = types.ModuleType("DrissionPage")
+        drission_page.ChromiumOptions = mock.Mock(return_value=chrome_options)
+        drission_page.ChromiumPage = mock.Mock(return_value=fake_browser)
+
+        with mock.patch.dict(sys.modules, {"DrissionPage": drission_page}):
+            ok, detail = mission._attendance_via_browser()
+
+        self.assertTrue(ok, detail)
+        self.assertEqual(detail, "cookie ok")
+        mission._browser_login.assert_not_called()
+        self.assertEqual(fake_browser.events[0], ("get", module.NODESEEK_BASE_URL))
+        self.assertEqual(fake_browser.events[1][0], "cookies")
+        self.assertEqual(
+            fake_browser.events[2],
+            ("get", f"{module.NODESEEK_BASE_URL}/board"),
+        )
+
     def test_browser_login_prefers_browser_turnstile_token_without_solver(self):
         module = load_module(
             "nodeseek_browser_page_token_login_under_test",

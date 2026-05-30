@@ -674,12 +674,32 @@ class NodeSeekDailyMission:
                 f"Browser homepage: title={str(browser.title)[:60]} url={str(browser.url)[:80]}"
             )
 
-            # Step 2: If we have credentials, always login to get fresh cookies
+            cookie_detail = ""
+
+            # Step 2: Try cookies first after passing CF.
+            if self.cookie_str:
+                browser.set.cookies(self.parse_cookie_string(self.cookie_str))
+                browser.get(f"{NODESEEK_BASE_URL}/board", timeout=30)
+                if not self._wait_for_cloudflare(browser):
+                    cookie_detail = "Browser stuck on Cloudflare challenge with cookies"
+                else:
+                    ok, detail = self._browser_fetch_attendance(browser)
+                    if ok:
+                        self._save_browser_cookies(browser)
+                        return True, detail
+                    cookie_detail = detail
+
+            # Step 3: Fall back to username/password only after cookies fail.
             if self.username and self.password:
+                if cookie_detail:
+                    logger.warning(
+                        f"NodeSeek cookie attendance failed for "
+                        f"{self.get_account_display_name()}: {cookie_detail}; "
+                        "falling back to username/password login"
+                    )
                 ok, detail = self._browser_login(browser)
                 if not ok:
                     return False, detail
-                # After login, do attendance
                 browser.get(f"{NODESEEK_BASE_URL}/board", timeout=30)
                 if not self._wait_for_cloudflare(browser):
                     return False, "Browser stuck on Cloudflare challenge after login"
@@ -689,17 +709,8 @@ class NodeSeekDailyMission:
                     return True, detail
                 return False, f"Login OK but attendance failed: {detail}"
 
-            # Step 3: Cookie-only mode — set cookies AFTER passing CF
-            if self.cookie_str:
-                browser.set.cookies(self.parse_cookie_string(self.cookie_str))
-                browser.get(f"{NODESEEK_BASE_URL}/board", timeout=30)
-                if not self._wait_for_cloudflare(browser):
-                    return False, "Browser stuck on Cloudflare challenge with cookies"
-                ok, detail = self._browser_fetch_attendance(browser)
-                if ok:
-                    self._save_browser_cookies(browser)
-                    return True, detail
-                return False, detail
+            if cookie_detail:
+                return False, cookie_detail
 
             return False, "No credentials or cookies configured"
 
