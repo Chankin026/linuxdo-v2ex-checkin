@@ -3,6 +3,7 @@ import pathlib
 import sys
 import types
 import unittest
+import json
 from unittest import mock
 
 
@@ -70,6 +71,49 @@ class XiaoHeiHeNotificationTests(unittest.TestCase):
         self.assertEqual(title, "Xiaoheihe")
         self.assertIn("Reward: H币+3, exp+15", message)
         self.assertNotIn("Request mode:", message)
+
+    def test_run_retries_state_verification_until_reward_is_available(self):
+        module = load_xiaoheihe_module()
+        notifier = mock.Mock()
+        mission = module.XiaoHeiHeDailyMission(
+            notifier=notifier,
+            account_name="main",
+            cookie="pkey=abc; x_xhh_tokenid=token",
+        )
+
+        def response(payload):
+            item = mock.Mock(status_code=200, text=json.dumps(payload))
+            item.json.return_value = payload
+            return item
+
+        responses = iter(
+            [
+                response({"status": "ok", "result": {"state": "waiting"}}),
+                response({"status": "ok"}),
+                response({"status": "ok"}),
+                response(
+                    {
+                        "status": "ok",
+                        "result": {
+                            "state": "ok",
+                            "sign_in_coin": 66,
+                            "sign_in_exp": 60,
+                            "sign_in_streak": 17,
+                        },
+                    }
+                ),
+            ]
+        )
+        mission.execute_action = mock.Mock(side_effect=lambda _action: next(responses))
+
+        with mock.patch.object(module.time, "sleep") as sleep:
+            ok = mission.run()
+
+        self.assertTrue(ok)
+        sleep.assert_called_once()
+        _, message = notifier.send_all.call_args.args
+        self.assertIn("Reward: H币+66, exp+60", message)
+        self.assertIn("streak=17", message)
 
 
 if __name__ == "__main__":

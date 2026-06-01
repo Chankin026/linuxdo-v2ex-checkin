@@ -484,6 +484,10 @@ class NodeSeekBrowserEmailVerificationTests(unittest.TestCase):
         self.assertTrue(ok, detail)
         self.assertIn("page-login-token", browser.login_request_script)
         self.assertNotIn("turnstile-token", browser.login_request_script)
+        self.assertIn("'x-captcha-token': \"page-login-token\"", browser.login_request_script)
+        self.assertIn("'x-captcha-source': 'turnstile'", browser.login_request_script)
+        self.assertNotIn("    token:", browser.login_request_script)
+        self.assertNotIn("    source: 'turnstile'", browser.login_request_script)
 
     def test_browser_login_completes_email_verification_when_required(self):
         module = load_module(

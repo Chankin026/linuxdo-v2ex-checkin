@@ -23,6 +23,8 @@ DEFAULT_IMPERSONATE = (
     os.environ.get("IMPERSONATE_VERSION", "chrome136").strip() or "chrome136"
 )
 DEFAULT_XIAOHEIHE_DEVICE_MODEL = "SM-S9210"
+POST_SIGN_VERIFY_ATTEMPTS = 3
+POST_SIGN_VERIFY_INTERVAL_SECONDS = 1
 
 XIAOHEIHE_REQUEST_MODE_LABELS = {
     "signer": "python local signer",
@@ -382,6 +384,10 @@ class XiaoHeiHeDailyMission:
             return ", ".join(rewards)
         return "no reward parsed"
 
+    @staticmethod
+    def has_reward_summary(detail: str) -> bool:
+        return XiaoHeiHeDailyMission.format_reward_summary(detail) != "no reward parsed"
+
     def send_success_notification(self, detail: str) -> None:
         lines = [
             "✅ Xiaoheihe daily mission completed",
@@ -439,13 +445,23 @@ class XiaoHeiHeDailyMission:
             self.send_failure_notification(detail)
             return False
 
-        try:
-            verify_response = self.execute_action("state")
-            verify_state, verify_detail = self.classify_sign_state(verify_response)
-            if verify_state == "already_done" and verify_detail:
-                detail = verify_detail
-        except Exception as exc:
-            logger.warning(f"Xiaoheihe post-sign verification failed: {exc}")
+        for attempt in range(1, POST_SIGN_VERIFY_ATTEMPTS + 1):
+            try:
+                verify_response = self.execute_action("state")
+                verify_state, verify_detail = self.classify_sign_state(verify_response)
+                if (
+                    verify_state == "already_done"
+                    and verify_detail
+                    and self.has_reward_summary(verify_detail)
+                ):
+                    detail = verify_detail
+                    break
+            except Exception as exc:
+                logger.warning(f"Xiaoheihe post-sign verification failed: {exc}")
+                break
+
+            if attempt < POST_SIGN_VERIFY_ATTEMPTS:
+                time.sleep(POST_SIGN_VERIFY_INTERVAL_SECONDS)
 
         logger.success(f"Xiaoheihe sign succeeded: {detail}")
         self.send_success_notification(detail)
