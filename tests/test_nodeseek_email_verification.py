@@ -252,6 +252,7 @@ class MainNodeSeekEmailConfigTests(unittest.TestCase):
         }
         with (
             mock.patch.dict(os.environ, env, clear=True),
+            mock.patch("os.path.isfile", return_value=False),
             mock.patch("os.path.exists", return_value=False),
         ):
             module = load_module(
@@ -282,6 +283,7 @@ class MainNodeSeekEmailConfigTests(unittest.TestCase):
         }
         with (
             mock.patch.dict(os.environ, env, clear=True),
+            mock.patch("os.path.isfile", return_value=False),
             mock.patch("os.path.exists", return_value=False),
         ):
             module = load_module(
@@ -306,6 +308,7 @@ class MainNodeSeekEmailConfigTests(unittest.TestCase):
         }
         with (
             mock.patch.dict(os.environ, env, clear=True),
+            mock.patch("os.path.isfile", return_value=False),
             mock.patch("os.path.exists", return_value=False),
         ):
             module = load_module(
@@ -331,6 +334,7 @@ class MainNodeSeekEmailConfigTests(unittest.TestCase):
         }
         with (
             mock.patch.dict(os.environ, env, clear=True),
+            mock.patch("os.path.isfile", return_value=False),
             mock.patch("os.path.exists", return_value=False),
         ):
             module = load_module(
