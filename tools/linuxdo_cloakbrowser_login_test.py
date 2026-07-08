@@ -522,6 +522,39 @@ def get_csrf_token(page) -> str:
     return result.strip() if isinstance(result, str) else ""
 
 
+def get_captcha_response_fields(page) -> Dict[str, str]:
+    script = """
+() => {
+  const fields = {};
+  const selectors = [
+    'textarea[name*="captcha"]',
+    'input[name*="captcha"]',
+    'textarea[name*="turnstile"]',
+    'input[name*="turnstile"]'
+  ];
+  for (const el of document.querySelectorAll(selectors.join(','))) {
+    const name = (el.getAttribute('name') || '').trim();
+    const value = (el.value || el.getAttribute('value') || '').trim();
+    if (name && value) {
+      fields[name] = value;
+    }
+  }
+  return fields;
+}
+"""
+    try:
+        result = page.evaluate(script)
+    except Exception:
+        return {}
+    if not isinstance(result, dict):
+        return {}
+    return {
+        str(name): str(value)
+        for name, value in result.items()
+        if str(name).strip() and str(value).strip()
+    }
+
+
 def fetch_csrf_token_from_linuxdo(page) -> Dict[str, object]:
     script = """
 async () => {
@@ -622,6 +655,7 @@ def submit_login_with_linuxdo(
                 "hcaptcha_token": hcaptcha_token,
             }
         )
+    form_data.update(get_captcha_response_fields(page))
     script = f"""
 async () => {{
   const response = await fetch('/session', {{

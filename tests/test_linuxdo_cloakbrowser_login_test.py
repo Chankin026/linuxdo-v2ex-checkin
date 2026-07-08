@@ -121,6 +121,20 @@ class LinuxDoHCaptchaHandshakeTests(unittest.TestCase):
         self.assertEqual(len(args), 1)
         self.assertIn("/session/csrf", args[0])
 
+    def test_get_captcha_response_fields_reads_existing_challenge_values(self):
+        page = mock.Mock()
+        page.evaluate.return_value = {
+            "cf-turnstile-response": "turnstile-token",
+            "h-captcha-response": "hcaptcha-token",
+            "empty": "",
+        }
+
+        fields = MODULE.get_captcha_response_fields(page)
+
+        self.assertEqual(fields["cf-turnstile-response"], "turnstile-token")
+        self.assertEqual(fields["h-captcha-response"], "hcaptcha-token")
+        self.assertNotIn("empty", fields)
+
     def test_register_hcaptcha_token_posts_to_linuxdo_endpoint(self):
         page = mock.Mock()
         page.evaluate.return_value = {"ok": True, "status": 200, "body": '{"success":"OK"}'}
@@ -140,14 +154,19 @@ class LinuxDoHCaptchaHandshakeTests(unittest.TestCase):
         page = mock.Mock()
         page.evaluate.return_value = {"ok": True, "status": 200, "url": "https://linux.do/session", "body": '{"result":"ok"}'}
 
-        result = MODULE.submit_login_with_linuxdo(
-            page,
-            "csrf-token",
-            "user@example.com",
-            "password123",
-            "Asia/Shanghai",
-            hcaptcha_token="pass-token",
-        )
+        with mock.patch.object(
+            MODULE,
+            "get_captcha_response_fields",
+            return_value={"cf-turnstile-response": "turnstile-token"},
+        ):
+            result = MODULE.submit_login_with_linuxdo(
+                page,
+                "csrf-token",
+                "user@example.com",
+                "password123",
+                "Asia/Shanghai",
+                hcaptcha_token="pass-token",
+            )
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["status"], 200)
@@ -162,6 +181,8 @@ class LinuxDoHCaptchaHandshakeTests(unittest.TestCase):
         self.assertIn("g-recaptcha-response", args[0])
         self.assertIn("hcaptcha_token", args[0])
         self.assertIn("pass-token", args[0])
+        self.assertIn("cf-turnstile-response", args[0])
+        self.assertIn("turnstile-token", args[0])
         self.assertIn("X-Requested-With", args[0])
         self.assertIn("Discourse-Present", args[0])
         self.assertIn("Accept", args[0])
