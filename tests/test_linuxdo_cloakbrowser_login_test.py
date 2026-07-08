@@ -157,6 +157,7 @@ class LinuxDoHCaptchaHandshakeTests(unittest.TestCase):
         self.assertIn("csrf-token", args[0])
         self.assertIn("user@example.com", args[0])
         self.assertIn("password123", args[0])
+        self.assertNotIn("second_factor_method", args[0])
         self.assertIn("h-captcha-response", args[0])
         self.assertIn("g-recaptcha-response", args[0])
         self.assertIn("hcaptcha_token", args[0])

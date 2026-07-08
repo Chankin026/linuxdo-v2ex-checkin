@@ -612,7 +612,6 @@ def submit_login_with_linuxdo(
     form_data = {
         "login": username,
         "password": password,
-        "second_factor_method": "1",
         "timezone": timezone or "Asia/Shanghai",
     }
     if hcaptcha_token:
