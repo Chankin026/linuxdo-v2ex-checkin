@@ -464,6 +464,51 @@ def detect_hcaptcha_sitekey(page) -> str:
     return result.strip() if isinstance(result, str) else ""
 
 
+def install_hcaptcha_callback_capture(page) -> bool:
+    script = """
+() => {
+  window.__linuxdoHCaptchaCallbacks = window.__linuxdoHCaptchaCallbacks || [];
+  window.__linuxdoWrapHCaptcha = window.__linuxdoWrapHCaptcha || ((api) => {
+    if (!api || api.__linuxdoCallbackWrapped || typeof api.render !== 'function') {
+      return false;
+    }
+    const originalRender = api.render.bind(api);
+    api.render = (container, options = {}, ...rest) => {
+      const wrappedOptions = { ...options };
+      if (typeof options.callback === 'function') {
+        window.__linuxdoHCaptchaCallbacks.push(options.callback);
+        wrappedOptions.callback = (token, ...callbackArgs) => {
+          window.__linuxdoLastHCaptchaToken = token;
+          return options.callback(token, ...callbackArgs);
+        };
+      }
+      const widgetId = originalRender(container, wrappedOptions, ...rest);
+      window.__linuxdoLastHCaptchaWidgetId = widgetId;
+      return widgetId;
+    };
+    api.__linuxdoCallbackWrapped = true;
+    return true;
+  });
+
+  const existingCallback = window.discourseHCaptchaCallback;
+  if (!window.__linuxdoDiscourseHCaptchaCallbackWrapped) {
+    window.discourseHCaptchaCallback = function(...args) {
+      window.__linuxdoWrapHCaptcha(window.hcaptcha || args[0]);
+      if (typeof existingCallback === 'function') {
+        return existingCallback.apply(this, args);
+      }
+    };
+    window.__linuxdoDiscourseHCaptchaCallbackWrapped = true;
+  }
+  return window.__linuxdoWrapHCaptcha(window.hcaptcha);
+}
+"""
+    try:
+        return bool(page.evaluate(script))
+    except Exception:
+        return False
+
+
 def inject_hcaptcha_token(page, token: str) -> bool:
     script = f"""
 () => {{
@@ -491,11 +536,30 @@ def inject_hcaptcha_token(page, token: str) -> bool:
   for (const el of elements) {{
     el.value = token;
     el.innerHTML = token;
+    el.setAttribute('value', token);
     el.dispatchEvent(new Event('input', {{ bubbles: true }}));
     el.dispatchEvent(new Event('change', {{ bubbles: true }}));
   }}
+  for (const iframe of document.querySelectorAll('iframe[data-hcaptcha-widget-id]')) {{
+    iframe.setAttribute('data-hcaptcha-response', token);
+  }}
+  const api = window.hcaptcha;
+  if (api) {{
+    if (!api.__linuxdoOriginalGetResponse && typeof api.getResponse === 'function') {{
+      api.__linuxdoOriginalGetResponse = api.getResponse.bind(api);
+    }}
+    if (!api.__linuxdoOriginalGetRespKey && typeof api.getRespKey === 'function') {{
+      api.__linuxdoOriginalGetRespKey = api.getRespKey.bind(api);
+    }}
+    api.getResponse = () => token;
+    api.getRespKey = () => token;
+  }}
+  for (const callback of window.__linuxdoHCaptchaCallbacks || []) {{
+    try {{ callback(token); }} catch (e) {{}}
+  }}
   window.__hcaptchaToken = token;
   window.__hcaptchaResponse = token;
+  window.__linuxdoLastHCaptchaToken = token;
   return elements.length > 0;
 }}
 """
@@ -503,6 +567,54 @@ def inject_hcaptcha_token(page, token: str) -> bool:
         return bool(page.evaluate(script))
     except Exception:
         return False
+
+
+def submit_login_with_frontend_controller(page, username: str, password: str) -> Dict[str, object]:
+    if not username or not password:
+        return {"ok": False, "reason": "missing_credentials"}
+    script = f"""
+async () => {{
+  const owner = window.Discourse && window.Discourse.__container__;
+  const controller = owner && owner.lookup && owner.lookup('controller:login');
+  if (!controller || typeof controller.localLogin !== 'function') {{
+    return {{ ok: false, reason: 'missing_login_controller' }};
+  }}
+  try {{
+    if (typeof controller.set === 'function') {{
+      controller.set('loginName', {json.dumps(username)});
+      controller.set('loginPassword', {json.dumps(password)});
+      controller.set('loggingIn', false);
+    }} else {{
+      controller.loginName = {json.dumps(username)};
+      controller.loginPassword = {json.dumps(password)};
+      controller.loggingIn = false;
+    }}
+    await controller.localLogin();
+    return {{
+      ok: true,
+      loggedIn: !!controller.loggedIn,
+      loggingIn: !!controller.loggingIn,
+      flash: controller.flash || '',
+      flashType: controller.flashType || '',
+      showSecondFactor: !!controller.showSecondFactor,
+      showSecurityKey: !!controller.showSecurityKey
+    }};
+  }} catch (e) {{
+    return {{
+      ok: false,
+      reason: 'exception',
+      error: String(e),
+      status: e && e.jqXHR && e.jqXHR.status,
+      body: e && e.jqXHR && (e.jqXHR.responseText || JSON.stringify(e.jqXHR.responseJSON || {{}}))
+    }};
+  }}
+}}
+"""
+    try:
+        result = page.evaluate(script)
+    except Exception as exc:
+        return {"ok": False, "reason": "evaluate_failed", "error": str(exc)}
+    return result if isinstance(result, dict) else {"ok": False, "reason": "unexpected_result"}
 
 
 def get_csrf_token(page) -> str:
@@ -791,6 +903,7 @@ def try_password_login(
         print("[password] login form not ready", flush=True)
         return False, state
 
+    install_hcaptcha_callback_capture(page)
     login_input.fill(username)
     password_input.fill(password)
     wait_for_settle(1)
@@ -830,6 +943,28 @@ def try_password_login(
                 flush=True,
             )
             if registered.get("success") or hcaptcha_token:
+                frontend_result = submit_login_with_frontend_controller(page, username, password)
+                print(
+                    f"[linuxdo-frontend-login] ok={frontend_result.get('ok')} "
+                    f"logged_in={frontend_result.get('loggedIn')} "
+                    f"reason={frontend_result.get('reason')} "
+                    f"flash={str(frontend_result.get('flash', ''))[:120]}",
+                    flush=True,
+                )
+                wait_for_settle(10)
+                post_state = get_page_state(page)
+                print(
+                    f"[password-post-frontend] url={post_state.get('url')} "
+                    f"challenge={post_state.get('is_challenge')} "
+                    f"turnstile={post_state.get('has_turnstile')} "
+                    f"hcaptcha={post_state.get('has_hcaptcha')} "
+                    f"logged_in={post_state.get('looks_logged_in')}",
+                    flush=True,
+                )
+                if page_looks_logged_in(post_state):
+                    ok, validation_state = validate_login(page, context)
+                    return ok, validation_state or post_state
+
                 timezone_value = "Asia/Shanghai"
                 try:
                     timezone_value = page.evaluate("() => Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai'")

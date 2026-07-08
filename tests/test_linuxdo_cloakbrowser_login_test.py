@@ -121,6 +121,42 @@ class LinuxDoHCaptchaHandshakeTests(unittest.TestCase):
         self.assertEqual(len(args), 1)
         self.assertIn("/session/csrf", args[0])
 
+    def test_install_hcaptcha_callback_capture_wraps_render(self):
+        page = mock.Mock()
+        page.evaluate.return_value = True
+
+        self.assertTrue(MODULE.install_hcaptcha_callback_capture(page))
+        args = page.evaluate.call_args.args
+        self.assertEqual(len(args), 1)
+        self.assertIn("__linuxdoHCaptchaCallbacks", args[0])
+        self.assertIn("discourseHCaptchaCallback", args[0])
+
+    def test_inject_hcaptcha_token_invokes_captured_callbacks(self):
+        page = mock.Mock()
+        page.evaluate.return_value = True
+
+        self.assertTrue(MODULE.inject_hcaptcha_token(page, "pass-token"))
+        args = page.evaluate.call_args.args
+        self.assertEqual(len(args), 1)
+        self.assertIn("__linuxdoHCaptchaCallbacks", args[0])
+        self.assertIn("getResponse", args[0])
+        self.assertIn("pass-token", args[0])
+
+    def test_submit_login_with_frontend_controller_invokes_local_login(self):
+        page = mock.Mock()
+        page.evaluate.return_value = {"ok": True, "loggedIn": True}
+
+        result = MODULE.submit_login_with_frontend_controller(
+            page, "user@example.com", "password123"
+        )
+
+        self.assertTrue(result["ok"])
+        args = page.evaluate.call_args.args
+        self.assertEqual(len(args), 1)
+        self.assertIn("controller:login", args[0])
+        self.assertIn("localLogin", args[0])
+        self.assertIn("user@example.com", args[0])
+
     def test_get_captcha_response_fields_reads_existing_challenge_values(self):
         page = mock.Mock()
         page.evaluate.return_value = {
