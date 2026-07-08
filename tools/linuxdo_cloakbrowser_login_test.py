@@ -579,6 +579,17 @@ async () => {{
   if (!controller || typeof controller.localLogin !== 'function') {{
     return {{ ok: false, reason: 'missing_login_controller' }};
   }}
+  const resetLoggingIn = () => {{
+    try {{
+      if (typeof controller.set === 'function') {{
+        controller.set('loggingIn', false);
+      }} else {{
+        controller.loggingIn = false;
+      }}
+    }} catch (e) {{
+      try {{ controller.loggingIn = false; }} catch (_) {{}}
+    }}
+  }};
   try {{
     if (typeof controller.set === 'function') {{
       controller.set('loginName', {json.dumps(username)});
@@ -589,7 +600,23 @@ async () => {{
       controller.loginPassword = {json.dumps(password)};
       controller.loggingIn = false;
     }}
-    await controller.localLogin();
+    const timeoutMs = 15000;
+    const loginResult = await Promise.race([
+      Promise.resolve().then(() => controller.localLogin()).then(() => ({{ timedOut: false }})),
+      new Promise(resolve => window.setTimeout(() => resolve({{ timedOut: true }}), timeoutMs))
+    ]);
+    if (loginResult && loginResult.timedOut) {{
+      resetLoggingIn();
+      return {{
+        ok: false,
+        reason: 'frontend_timeout',
+        timeoutMs,
+        loggedIn: !!controller.loggedIn,
+        loggingIn: !!controller.loggingIn,
+        flash: controller.flash || '',
+        flashType: controller.flashType || ''
+      }};
+    }}
     return {{
       ok: true,
       loggedIn: !!controller.loggedIn,
@@ -600,6 +627,7 @@ async () => {{
       showSecurityKey: !!controller.showSecurityKey
     }};
   }} catch (e) {{
+    resetLoggingIn();
     return {{
       ok: false,
       reason: 'exception',

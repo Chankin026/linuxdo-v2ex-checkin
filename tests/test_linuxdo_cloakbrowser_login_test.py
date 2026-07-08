@@ -155,6 +155,9 @@ class LinuxDoHCaptchaHandshakeTests(unittest.TestCase):
         self.assertEqual(len(args), 1)
         self.assertIn("controller:login", args[0])
         self.assertIn("localLogin", args[0])
+        self.assertIn("Promise.race", args[0])
+        self.assertIn("frontend_timeout", args[0])
+        self.assertIn("timeoutMs = 15000", args[0])
         self.assertIn("user@example.com", args[0])
 
     def test_get_captcha_response_fields_reads_existing_challenge_values(self):
