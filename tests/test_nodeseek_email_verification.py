@@ -432,6 +432,85 @@ class NodeSeekBrowserEmailVerificationTests(unittest.TestCase):
             ("get", f"{module.NODESEEK_BASE_URL}/board"),
         )
 
+    def test_cookie_cloudflare_failure_does_not_fallback_to_password(self):
+        module = load_module(
+            "nodeseek_cookie_fail_fast_browser_under_test",
+            NODESEEK_PATH,
+            stub_modules=build_nodeseek_stub_modules(),
+        )
+
+        class FakeCookieSetter:
+            def __init__(self, browser):
+                self.browser = browser
+
+            def cookies(self, cookies):
+                self.browser.events.append(("cookies", cookies))
+
+        class FakeBrowser:
+            title = "NodeSeek"
+            url = "https://www.nodeseek.com"
+
+            def __init__(self, *_args, **_kwargs):
+                self.events = []
+                self.set = FakeCookieSetter(self)
+
+            def get(self, url, timeout=30):
+                self.events.append(("get", url))
+                self.url = url
+
+            def quit(self):
+                self.events.append(("quit", None))
+
+        fake_browser = FakeBrowser()
+        chrome_options = mock.Mock()
+        chrome_options.auto_port.return_value = chrome_options
+        chrome_options.headless.return_value = chrome_options
+        chrome_options.incognito.return_value = chrome_options
+        chrome_options.set_argument.return_value = chrome_options
+        chrome_options.set_user_agent.return_value = chrome_options
+
+        mission = module.NodeSeekDailyMission(
+            cookie_str="nodepay_session=cookie-session",
+            username="neal",
+            password="password",
+        )
+        mission._wait_for_cloudflare = mock.Mock(side_effect=[True, False])
+        mission._browser_login = mock.Mock(return_value=(True, "login ok"))
+        mission._browser_fetch_attendance = mock.Mock()
+
+        drission_page = types.ModuleType("DrissionPage")
+        drission_page.ChromiumOptions = mock.Mock(return_value=chrome_options)
+        drission_page.ChromiumPage = mock.Mock(return_value=fake_browser)
+
+        with mock.patch.dict(sys.modules, {"DrissionPage": drission_page}):
+            ok, detail = mission._attendance_via_browser()
+
+        self.assertFalse(ok)
+        self.assertEqual(detail, "Browser stuck on Cloudflare challenge with cookies")
+        mission._browser_login.assert_not_called()
+        mission._browser_fetch_attendance.assert_not_called()
+
+    def test_request_with_fallback_does_not_retry_challenge_response(self):
+        module = load_module(
+            "nodeseek_request_no_retry_under_test",
+            NODESEEK_PATH,
+            stub_modules=build_nodeseek_stub_modules(),
+        )
+
+        response = mock.Mock()
+        response.status_code = 403
+        response.headers = {"server": "cloudflare"}
+        response.text = "Just a moment..."
+
+        mission = module.NodeSeekDailyMission()
+        mission.impersonate_candidates = ["chrome136", "chrome133a", "firefox135"]
+        mission.session.request = mock.Mock(return_value=response)
+
+        result = mission.request_with_fallback("GET", "https://www.nodeseek.com/api/test")
+
+        self.assertIs(result, response)
+        mission.session.request.assert_called_once()
+
     def test_browser_login_prefers_browser_turnstile_token_without_solver(self):
         module = load_module(
             "nodeseek_browser_page_token_login_under_test",

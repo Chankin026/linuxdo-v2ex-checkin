@@ -442,37 +442,21 @@ class NodeSeekDailyMission:
         )
 
     def request_with_fallback(self, method: str, url: str, **kwargs):
-        last_response = None
-        last_error = None
-        for impersonate in self.impersonate_candidates:
-            try:
-                response = self.session.request(
-                    method,
-                    url,
-                    impersonate=impersonate,
-                    timeout=20,
-                    allow_redirects=True,
-                    **kwargs,
-                )
-                last_response = response
-                if self.should_fallback(response):
-                    logger.warning(
-                        f"NodeSeek request hit challenge with {impersonate}: "
-                        f"{response.status_code}; trying next fingerprint"
-                    )
-                    continue
-                return response
-            except Exception as e:
-                last_error = e
-                logger.warning(
-                    f"NodeSeek request failed with {impersonate}: {e}; trying next fingerprint"
-                )
-
-        if last_response is not None:
-            return last_response
-        if last_error is not None:
-            raise last_error
-        raise RuntimeError("NodeSeek request failed without a response")
+        impersonate = self.impersonate_candidates[0]
+        response = self.session.request(
+            method,
+            url,
+            impersonate=impersonate,
+            timeout=20,
+            allow_redirects=True,
+            **kwargs,
+        )
+        if self.should_fallback(response):
+            logger.warning(
+                f"NodeSeek request hit challenge with {impersonate}: "
+                f"{response.status_code}; failing without retry"
+            )
+        return response
 
     def build_attendance_url(self) -> str:
         random_value = "true" if self.attendance_random else "false"
@@ -689,14 +673,10 @@ class NodeSeekDailyMission:
                         return True, detail
                     cookie_detail = detail
 
-            # Step 3: Fall back to username/password only after cookies fail.
+            # Step 3: Use username/password only when no cookie path failed first.
             if self.username and self.password:
                 if cookie_detail:
-                    logger.warning(
-                        f"NodeSeek cookie attendance failed for "
-                        f"{self.get_account_display_name()}: {cookie_detail}; "
-                        "falling back to username/password login"
-                    )
+                    return False, cookie_detail
                 ok, detail = self._browser_login(browser)
                 if not ok:
                     return False, detail
