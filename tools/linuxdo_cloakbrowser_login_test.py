@@ -605,9 +605,24 @@ def submit_login_with_linuxdo(
     username: str,
     password: str,
     timezone: str,
+    hcaptcha_token: str = "",
 ) -> Dict[str, object]:
     if not csrf_token or not username or not password:
         return {"ok": False, "status": 0, "url": "", "body": ""}
+    form_data = {
+        "login": username,
+        "password": password,
+        "second_factor_method": "1",
+        "timezone": timezone or "Asia/Shanghai",
+    }
+    if hcaptcha_token:
+        form_data.update(
+            {
+                "h-captcha-response": hcaptcha_token,
+                "g-recaptcha-response": hcaptcha_token,
+                "hcaptcha_token": hcaptcha_token,
+            }
+        )
     script = f"""
 async () => {{
   const response = await fetch('/session', {{
@@ -619,12 +634,7 @@ async () => {{
       'Discourse-Present': 'true',
       'Accept': '*/*'
     }},
-    body: new URLSearchParams({{
-      login: {json.dumps(username)},
-      password: {json.dumps(password)},
-      second_factor_method: '1',
-      timezone: {json.dumps(timezone or 'Asia/Shanghai')}
-    }}).toString(),
+    body: new URLSearchParams({json.dumps(form_data)}).toString(),
     credentials: 'same-origin'
   }});
   return {{
@@ -786,7 +796,7 @@ def try_password_login(
                 f"status={registered.get('status')} body={str(registered.get('body', ''))[:200]}",
                 flush=True,
             )
-            if registered.get("success"):
+            if registered.get("success") or hcaptcha_token:
                 timezone_value = "Asia/Shanghai"
                 try:
                     timezone_value = page.evaluate("() => Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai'")
@@ -798,6 +808,7 @@ def try_password_login(
                     username,
                     password,
                     str(timezone_value or "Asia/Shanghai"),
+                    hcaptcha_token=hcaptcha_token,
                 )
                 print(
                     f"[linuxdo-session] status={login_result.get('status')} url={login_result.get('url')} "

@@ -146,6 +146,7 @@ class LinuxDoHCaptchaHandshakeTests(unittest.TestCase):
             "user@example.com",
             "password123",
             "Asia/Shanghai",
+            hcaptcha_token="pass-token",
         )
 
         self.assertTrue(result["ok"])
@@ -156,6 +157,10 @@ class LinuxDoHCaptchaHandshakeTests(unittest.TestCase):
         self.assertIn("csrf-token", args[0])
         self.assertIn("user@example.com", args[0])
         self.assertIn("password123", args[0])
+        self.assertIn("h-captcha-response", args[0])
+        self.assertIn("g-recaptcha-response", args[0])
+        self.assertIn("hcaptcha_token", args[0])
+        self.assertIn("pass-token", args[0])
         self.assertIn("X-Requested-With", args[0])
         self.assertIn("Discourse-Present", args[0])
         self.assertIn("Accept", args[0])

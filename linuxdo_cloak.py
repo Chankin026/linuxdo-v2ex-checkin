@@ -1098,9 +1098,24 @@ async () => {{
         username: str,
         password: str,
         timezone: str,
+        hcaptcha_token: str = "",
     ) -> Dict[str, object]:
         if not csrf_token or not username or not password:
             return {"ok": False, "status": 0, "url": "", "body": ""}
+        form_data = {
+            "login": username,
+            "password": password,
+            "second_factor_method": "1",
+            "timezone": timezone or "Asia/Shanghai",
+        }
+        if hcaptcha_token:
+            form_data.update(
+                {
+                    "h-captcha-response": hcaptcha_token,
+                    "g-recaptcha-response": hcaptcha_token,
+                    "hcaptcha_token": hcaptcha_token,
+                }
+            )
         return self.browser_fetch(
             page,
             "POST",
@@ -1112,14 +1127,7 @@ async () => {{
                 "Discourse-Present": "true",
                 "Accept": "*/*",
             },
-            body=urlencode(
-                {
-                    "login": username,
-                    "password": password,
-                    "second_factor_method": "1",
-                    "timezone": timezone or "Asia/Shanghai",
-                }
-            ),
+            body=urlencode(form_data),
         )
 
     def try_cookie_login(self, cookie_str: str) -> Tuple[bool, Dict[str, object]]:
@@ -1212,7 +1220,7 @@ async () => {{
                     f"[hcaptcha] registered_with_linuxdo={registered.get('success')} "
                     f"status={registered.get('status')} body={str(registered.get('body', ''))[:200]}"
                 )
-                if registered.get("success"):
+                if registered.get("success") or hcaptcha_token:
                     timezone_value = "Asia/Shanghai"
                     try:
                         timezone_value = self.page.evaluate(
@@ -1226,6 +1234,7 @@ async () => {{
                         username,
                         password,
                         str(timezone_value or "Asia/Shanghai"),
+                        hcaptcha_token=hcaptcha_token,
                     )
                     logger.info(
                         f"[linuxdo-session] status={login_result.get('status')} url={login_result.get('url')} "
