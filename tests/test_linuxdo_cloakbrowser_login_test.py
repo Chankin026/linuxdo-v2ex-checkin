@@ -142,6 +142,27 @@ class LinuxDoHCaptchaHandshakeTests(unittest.TestCase):
         self.assertIn("getResponse", args[0])
         self.assertIn("pass-token", args[0])
 
+    def test_install_login_request_capture_wraps_fetch_and_xhr(self):
+        page = mock.Mock()
+        page.evaluate.return_value = True
+
+        self.assertTrue(MODULE.install_login_request_capture(page))
+        args = page.evaluate.call_args.args
+        self.assertEqual(len(args), 1)
+        self.assertIn("__linuxdoLoginRequests", args[0])
+        self.assertIn("window.fetch", args[0])
+        self.assertIn("XMLHttpRequest", args[0])
+        self.assertIn("summarizeBody", args[0])
+        self.assertNotIn("password123", args[0])
+
+    def test_get_login_request_traces_returns_dict_items(self):
+        page = mock.Mock()
+        page.evaluate.return_value = [{"status": 403}, "ignore", {"status": 200}]
+
+        traces = MODULE.get_login_request_traces(page)
+
+        self.assertEqual(traces, [{"status": 403}, {"status": 200}])
+
     def test_submit_login_with_frontend_controller_invokes_local_login(self):
         page = mock.Mock()
         page.evaluate.return_value = {"ok": True, "loggedIn": True}

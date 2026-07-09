@@ -751,6 +751,164 @@ def inject_hcaptcha_token(page, token: str) -> bool:
         return False
 
 
+def install_login_request_capture(page) -> bool:
+    script = """
+() => {
+  if (window.__linuxdoLoginCaptureInstalled) {
+    return true;
+  }
+  window.__linuxdoLoginRequests = window.__linuxdoLoginRequests || [];
+  const shouldCapture = (url) => {
+    const value = String(url || '');
+    return (
+      value.includes('/session') ||
+      value.includes('/hcaptcha') ||
+      value.includes('/login')
+    );
+  };
+  const summarizeBody = (body) => {
+    if (!body) return { length: 0, keys: [] };
+    let text = '';
+    if (typeof body === 'string') {
+      text = body;
+    } else if (body instanceof URLSearchParams) {
+      text = body.toString();
+    } else {
+      return {
+        length: 0,
+        keys: [],
+        kind: Object.prototype.toString.call(body)
+      };
+    }
+    const keys = [];
+    try {
+      const params = new URLSearchParams(text);
+      for (const [key] of params.entries()) {
+        keys.push(key);
+      }
+    } catch (e) {}
+    return {
+      length: text.length,
+      keys: Array.from(new Set(keys)).sort()
+    };
+  };
+  const summarizeResponse = (text) => {
+    const value = String(text || '');
+    if (!value) return '';
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === 'object') {
+        const summary = { jsonKeys: Object.keys(parsed).sort().slice(0, 20) };
+        if (parsed.error_type) summary.error_type = String(parsed.error_type);
+        if (parsed.result) summary.result = String(parsed.result);
+        if (Array.isArray(parsed.errors)) {
+          summary.errors = parsed.errors.slice(0, 3).map((item) => String(item));
+        }
+        return JSON.stringify(summary).slice(0, 300);
+      }
+    } catch (e) {}
+    return value.replace(/\\s+/g, ' ').slice(0, 300);
+  };
+  const pushTrace = (trace) => {
+    window.__linuxdoLoginRequests.push(trace);
+    if (window.__linuxdoLoginRequests.length > 30) {
+      window.__linuxdoLoginRequests.shift();
+    }
+  };
+
+  if (typeof window.fetch === 'function' && !window.fetch.__linuxdoLoginCaptureWrapped) {
+    const originalFetch = window.fetch.bind(window);
+    const wrappedFetch = async (...args) => {
+      const input = args[0];
+      const init = args[1] || {};
+      const url = typeof input === 'string' ? input : (input && input.url) || '';
+      const method = (init.method || (input && input.method) || 'GET').toUpperCase();
+      const trace = shouldCapture(url)
+        ? {
+            type: 'fetch',
+            method,
+            url: String(url),
+            request: summarizeBody(init.body)
+          }
+        : null;
+      try {
+        const response = await originalFetch(...args);
+        if (trace) {
+          trace.status = response.status;
+          trace.ok = response.ok;
+          trace.responseUrl = response.url;
+          try {
+            trace.body = summarizeResponse(await response.clone().text());
+          } catch (e) {
+            trace.body = '';
+          }
+          pushTrace(trace);
+        }
+        return response;
+      } catch (e) {
+        if (trace) {
+          trace.error = String(e);
+          pushTrace(trace);
+        }
+        throw e;
+      }
+    };
+    wrappedFetch.__linuxdoLoginCaptureWrapped = true;
+    window.fetch = wrappedFetch;
+  }
+
+  if (window.XMLHttpRequest && !window.XMLHttpRequest.prototype.__linuxdoLoginCaptureWrapped) {
+    const proto = window.XMLHttpRequest.prototype;
+    const originalOpen = proto.open;
+    const originalSend = proto.send;
+    proto.open = function(method, url, ...rest) {
+      this.__linuxdoLoginTrace = shouldCapture(url)
+        ? { type: 'xhr', method: String(method || 'GET').toUpperCase(), url: String(url) }
+        : null;
+      return originalOpen.call(this, method, url, ...rest);
+    };
+    proto.send = function(body) {
+      const trace = this.__linuxdoLoginTrace;
+      if (trace) {
+        trace.request = summarizeBody(body);
+        this.addEventListener('loadend', () => {
+          trace.status = this.status;
+          trace.ok = this.status >= 200 && this.status < 300;
+          trace.responseUrl = this.responseURL || trace.url;
+          trace.body = summarizeResponse(this.responseText || '');
+          pushTrace(trace);
+        });
+      }
+      return originalSend.call(this, body);
+    };
+    proto.__linuxdoLoginCaptureWrapped = true;
+  }
+
+  window.__linuxdoLoginCaptureInstalled = true;
+  return true;
+}
+"""
+    try:
+        return bool(page.evaluate(script))
+    except Exception:
+        return False
+
+
+def get_login_request_traces(page) -> List[Dict[str, object]]:
+    script = """
+() => Array.isArray(window.__linuxdoLoginRequests)
+  ? window.__linuxdoLoginRequests.slice(-20)
+  : []
+"""
+    try:
+        result = page.evaluate(script)
+    except Exception:
+        return []
+    if not isinstance(result, list):
+        return []
+    return [item for item in result if isinstance(item, dict)]
+
+
 def submit_login_with_frontend_controller(page, username: str, password: str) -> Dict[str, object]:
     if not username or not password:
         return {"ok": False, "reason": "missing_credentials"}
@@ -1358,6 +1516,7 @@ async () => {{
             return False, state
 
         install_hcaptcha_callback_capture(self.page)
+        install_login_request_capture(self.page)
         login_input.fill(username)
         password_input.fill(password)
         wait_for_settle(1)
@@ -1404,6 +1563,13 @@ async () => {{
                         f"reason={frontend_result.get('reason')} "
                         f"flash={str(frontend_result.get('flash', ''))[:120]}"
                     )
+                    logger.info(
+                        "[linuxdo-login-requests] "
+                        + json.dumps(
+                            get_login_request_traces(self.page),
+                            ensure_ascii=False,
+                        )[:1200]
+                    )
                     wait_for_settle(10)
                     post_state = get_page_state(self.page)
                     logger.info(
@@ -1434,6 +1600,13 @@ async () => {{
                     logger.info(
                         f"[linuxdo-session] status={login_result.get('status')} url={login_result.get('url')} "
                         f"body={str(login_result.get('body', ''))[:200]}"
+                    )
+                    logger.info(
+                        "[linuxdo-login-requests] "
+                        + json.dumps(
+                            get_login_request_traces(self.page),
+                            ensure_ascii=False,
+                        )[:1200]
                     )
                     wait_for_settle(10)
                     post_state = get_page_state(self.page)
