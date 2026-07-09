@@ -343,7 +343,7 @@ TOPIC_LIST_URL = env_str("LINUXDO_TOPIC_LIST_URL", "https://linux.do/latest")
 LOGIN_URL = "https://linux.do/login"
 SESSION_URL = "https://linux.do/session"
 CSRF_URL = "https://linux.do/session/csrf"
-HCAPTCHA_CREATE_URL = "https://linux.do/hcaptcha/create.json"
+HCAPTCHA_CREATE_URL = "https://linux.do/captcha/hcaptcha/create.json"
 CURRENT_SESSION_URL = "https://linux.do/session/current.json"
 TOPICS_TIMINGS_URL = "https://linux.do/topics/timings"
 ACCOUNT_PREFERENCES_URL = "https://linux.do/my/preferences/account"
@@ -739,10 +739,17 @@ def inject_hcaptcha_token(page, token: str) -> bool:
   for (const callback of window.__linuxdoHCaptchaCallbacks || []) {{
     try {{ callback(token); }} catch (e) {{}}
   }}
+  const owner = window.Discourse && window.Discourse.__container__;
+  const service = owner && owner.lookup && owner.lookup('service:captcha-service');
+  if (service) {{
+    service.token = token;
+    service.invalid = !token;
+    service.submitted = !!token;
+  }}
   window.__hcaptchaToken = token;
   window.__hcaptchaResponse = token;
   window.__linuxdoLastHCaptchaToken = token;
-  return elements.length > 0;
+  return elements.length > 0 || !!service;
 }}
 """
     try:
@@ -762,6 +769,7 @@ def install_login_request_capture(page) -> bool:
     const value = String(url || '');
     return (
       value.includes('/session') ||
+      value.includes('/captcha') ||
       value.includes('/hcaptcha') ||
       value.includes('/login')
     );
@@ -1402,7 +1410,7 @@ async () => {{
         result = self.browser_fetch(
             page,
             "POST",
-            "/hcaptcha/create.json",
+            "/captcha/hcaptcha/create.json",
             headers={
                 "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
                 "X-CSRF-Token": csrf_token,

@@ -140,6 +140,7 @@ class LinuxDoHCaptchaHandshakeTests(unittest.TestCase):
         self.assertEqual(len(args), 1)
         self.assertIn("__linuxdoHCaptchaCallbacks", args[0])
         self.assertIn("getResponse", args[0])
+        self.assertIn("service:captcha-service", args[0])
         self.assertIn("pass-token", args[0])
 
     def test_install_login_request_capture_wraps_fetch_and_xhr(self):
@@ -206,7 +207,7 @@ class LinuxDoHCaptchaHandshakeTests(unittest.TestCase):
         self.assertEqual(result["json"].get("success"), "OK")
         args = page.evaluate.call_args.args
         self.assertEqual(len(args), 1)
-        self.assertIn("/hcaptcha/create.json", args[0])
+        self.assertIn("/captcha/hcaptcha/create.json", args[0])
         self.assertIn("csrf-token", args[0])
         self.assertIn("pass-token", args[0])
 
