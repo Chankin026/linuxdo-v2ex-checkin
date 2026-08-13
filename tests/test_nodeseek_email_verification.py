@@ -324,6 +324,29 @@ class MainNodeSeekEmailConfigTests(unittest.TestCase):
         self.assertEqual(config["email_imap_username"], "")
         self.assertEqual(config["email_imap_password"], "mail-pass")
 
+    def test_nodeseek_yescaptcha_client_key_env_name_is_honoured(self):
+        env = {
+            "NODESEEK_USERNAME_1": "neal",
+            "NODESEEK_PASSWORD_1": "secret",
+            "NODESEEK_YESCAPTCHA_CLIENT_KEY": "ns-client-key",
+        }
+        with (
+            mock.patch.dict(os.environ, env, clear=True),
+            mock.patch("os.path.isfile", return_value=False),
+            mock.patch("os.path.exists", return_value=False),
+        ):
+            module = load_module(
+                "main_nodeseek_client_key_under_test",
+                MAIN_PATH,
+                stub_modules=build_main_stub_modules(),
+            )
+
+            config = module.build_nodeseek_account_config(1)
+
+        self.assertEqual(config["yescaptcha_client_key"], "ns-client-key")
+        # A key alone is enough to enable the solver.
+        self.assertEqual(config["solver_type"], "yescaptcha")
+
     def test_multiple_accounts_wait_between_runs(self):
         env = {
             "NODESEEK_USERNAME_1": "first",
@@ -436,61 +459,79 @@ class NodeSeekBrowserEmailVerificationTests(unittest.TestCase):
             ("get", f"{module.NODESEEK_BASE_URL}/board"),
         )
 
-    def test_cookie_cloudflare_failure_does_not_fallback_to_password(self):
+    def test_cookies_that_break_cloudflare_are_cleared_then_relogin(self):
+        """The homepage passes Cloudflare cookie-free in step 1, so stalling
+        only after injecting the stored cookies means those cookies are stale
+        (usually an expired cf_clearance) rather than the IP being blocked.
+        Keeping them would deadlock the account: stuck -> no re-login -> the
+        cookie is never refreshed.
+        """
         module = load_module(
-            "nodeseek_cookie_fail_fast_browser_under_test",
+            "nodeseek_poisoned_cookie_relogin_under_test",
             NODESEEK_PATH,
             stub_modules=build_nodeseek_stub_modules(),
         )
 
-        class FakeCookieSetter:
-            def __init__(self, browser):
-                self.browser = browser
-
-            def cookies(self, cookies):
-                self.browser.events.append(("cookies", cookies))
-
-        class FakeBrowser:
-            title = "NodeSeek"
-            url = "https://www.nodeseek.com"
-
-            def __init__(self, *_args, **_kwargs):
-                self.events = []
-                self.set = FakeCookieSetter(self)
-
-            def get(self, url, timeout=30):
-                self.events.append(("get", url))
-                self.url = url
-
-            def quit(self):
-                self.events.append(("quit", None))
-
-        fake_browser = FakeBrowser()
-        chrome_options = mock.Mock()
-        chrome_options.auto_port.return_value = chrome_options
-        chrome_options.headless.return_value = chrome_options
-        chrome_options.incognito.return_value = chrome_options
-        chrome_options.set_argument.return_value = chrome_options
-        chrome_options.set_user_agent.return_value = chrome_options
-
+        fake_browser = self._build_fake_browser_class()()
         mission = module.NodeSeekDailyMission(
-            cookie_str="nodepay_session=cookie-session",
+            cookie_str="cf_clearance=stale",
             username="neal",
             password="password",
         )
-        mission._wait_for_cloudflare = mock.Mock(side_effect=[True, False])
+        mission._wait_for_cloudflare = mock.Mock(
+            side_effect=[
+                True,   # step 1: homepage, no cookies
+                False,  # step 2: /board with the stored cookies -> stuck
+                True,   # homepage again after clearing cookies
+                True,   # /board after a fresh login
+            ]
+        )
         mission._browser_login = mock.Mock(return_value=(True, "login ok"))
+        mission._browser_fetch_attendance = mock.Mock(return_value=(True, "签到成功"))
+        mission._save_browser_cookies = mock.Mock()
+
+        with self._patched_drission(fake_browser):
+            ok, detail = mission._attendance_via_browser()
+
+        self.assertTrue(ok, detail)
+        self.assertEqual(detail, "签到成功")
+        mission._browser_login.assert_called_once()
+
+        # After the stall the browser must go back to the cookie-free homepage
+        # to clear Cloudflare again before logging in.
+        visited = [url for kind, url in fake_browser.events if kind == "get"]
+        self.assertEqual(
+            visited,
+            [
+                module.NODESEEK_BASE_URL,
+                f"{module.NODESEEK_BASE_URL}/board",
+                module.NODESEEK_BASE_URL,
+                f"{module.NODESEEK_BASE_URL}/board",
+            ],
+        )
+
+    def test_homepage_cloudflare_block_fails_fast_without_login(self):
+        module = load_module(
+            "nodeseek_homepage_block_fail_fast_under_test",
+            NODESEEK_PATH,
+            stub_modules=build_nodeseek_stub_modules(),
+        )
+
+        fake_browser = self._build_fake_browser_class()()
+        mission = module.NodeSeekDailyMission(
+            cookie_str="session=whatever",
+            username="neal",
+            password="password",
+        )
+        mission._wait_for_cloudflare = mock.Mock(return_value=False)
+        mission._browser_login = mock.Mock()
         mission._browser_fetch_attendance = mock.Mock()
 
-        drission_page = types.ModuleType("DrissionPage")
-        drission_page.ChromiumOptions = mock.Mock(return_value=chrome_options)
-        drission_page.ChromiumPage = mock.Mock(return_value=fake_browser)
-
-        with mock.patch.dict(sys.modules, {"DrissionPage": drission_page}):
+        with self._patched_drission(fake_browser):
             ok, detail = mission._attendance_via_browser()
 
         self.assertFalse(ok)
-        self.assertEqual(detail, "Browser stuck on Cloudflare challenge with cookies")
+        self.assertEqual(detail, "Browser stuck on Cloudflare challenge at homepage")
         mission._browser_login.assert_not_called()
         mission._browser_fetch_attendance.assert_not_called()
 

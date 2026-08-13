@@ -795,13 +795,21 @@ class NodeSeekDailyMission:
             )
 
             cookie_detail = ""
+            cookie_session_poisoned = False
 
             # Step 2: Try cookies first after passing CF.
             if self.cookie_str:
                 browser.set.cookies(self.parse_cookie_string(self.cookie_str))
                 browser.get(f"{NODESEEK_BASE_URL}/board", timeout=30)
                 if not self._wait_for_cloudflare(browser):
+                    # Step 1 already passed Cloudflare on this very browser and
+                    # IP with no cookies at all. Getting stuck only after
+                    # injecting the stored cookies means those cookies are the
+                    # problem — typically an expired cf_clearance — not that we
+                    # are being blocked. Re-logging in is the only way out;
+                    # keeping them would deadlock this account forever.
                     cookie_detail = "Browser stuck on Cloudflare challenge with cookies"
+                    cookie_session_poisoned = True
                 else:
                     ok, detail = self._browser_fetch_attendance(browser)
                     if ok:
@@ -813,18 +821,37 @@ class NodeSeekDailyMission:
             # dead. A Cloudflare block or rate limit still fails fast, because
             # logging in would not fix it and would waste captcha credit.
             if self.username and self.password:
-                if cookie_detail and not self._should_relogin_after_cookie_failure(
-                    browser, cookie_detail
-                ):
+                # Short-circuit: when the cookies poisoned the Cloudflare
+                # handshake the page never loaded, so probing login state would
+                # be meaningless.
+                needs_relogin = cookie_session_poisoned or (
+                    bool(cookie_detail)
+                    and self._should_relogin_after_cookie_failure(
+                        browser, cookie_detail
+                    )
+                )
+
+                if cookie_detail and not needs_relogin:
                     return False, cookie_detail
 
                 if cookie_detail:
                     logger.warning(
-                        "NodeSeek cookie session expired for "
+                        "NodeSeek stored cookies are unusable for "
                         f"{self.get_account_display_name()}: {cookie_detail}; "
-                        "logging in again to refresh cookies"
+                        "clearing them and logging in again to refresh cookies"
                     )
                     self._clear_browser_cookies(browser)
+
+                    if cookie_session_poisoned:
+                        # The tab is still parked on the challenge page. Go back
+                        # to the homepage cookie-free and clear Cloudflare again
+                        # before attempting the login flow.
+                        browser.get(NODESEEK_BASE_URL, timeout=30)
+                        if not self._wait_for_cloudflare(browser):
+                            return False, (
+                                "Browser stuck on Cloudflare challenge after "
+                                "clearing cookies"
+                            )
 
                 ok, detail = self._browser_login(browser)
                 if not ok:

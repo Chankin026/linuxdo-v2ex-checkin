@@ -157,7 +157,11 @@ NODESEEK_RANDOM = env_bool("NODESEEK_RANDOM", env_bool("NS_RANDOM", True))
 NODESEEK_SOLVER_TYPE = (
     env_str("NODESEEK_SOLVER_TYPE") or DEFAULT_SOLVER_TYPE or ""
 ).strip().lower()
-NODESEEK_CLIENT_KEY = DEFAULT_YESCAPTCHA_CLIENT_KEY
+NODESEEK_CLIENT_KEY = (
+    env_str("NODESEEK_YESCAPTCHA_CLIENT_KEY")
+    or env_str("NODESEEK_CLIENT_KEY")
+    or DEFAULT_YESCAPTCHA_CLIENT_KEY
+)
 NODESEEK_YESCAPTCHA_API_BASE_URL = (
     env_str("NODESEEK_YESCAPTCHA_API_BASE_URL")
     or DEFAULT_YESCAPTCHA_API_BASE_URL
@@ -305,7 +309,12 @@ def build_nodeseek_account_config(index: Optional[int] = None) -> Optional[Dict[
         index,
         default=NODESEEK_SOLVER_TYPE,
     ).strip().lower()
-    yescaptcha_client_key = NODESEEK_CLIENT_KEY
+    yescaptcha_client_key = indexed_env_str(
+        "NODESEEK_YESCAPTCHA_CLIENT_KEY",
+        index,
+        aliases=["NODESEEK_CLIENT_KEY"],
+        default=NODESEEK_CLIENT_KEY,
+    )
     if not solver_type and yescaptcha_client_key:
         solver_type = "yescaptcha"
 
