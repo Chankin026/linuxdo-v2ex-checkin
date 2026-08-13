@@ -707,6 +707,60 @@ class NodeSeekBrowserEmailVerificationTests(unittest.TestCase):
         self.assertEqual(detail, "unexpected attendance payload")
         mission._browser_login.assert_not_called()
 
+    def test_already_signed_in_today_is_success_even_on_http_500(self):
+        module = load_module(
+            "nodeseek_already_signed_in_under_test",
+            NODESEEK_PATH,
+            stub_modules=build_nodeseek_stub_modules(),
+        )
+
+        class FakeBrowser:
+            def run_js(self, js_code):
+                self.js = js_code
+                return json.dumps(
+                    {
+                        "status": 500,
+                        "body": json.dumps(
+                            {
+                                "success": False,
+                                "message": "今天已完成签到，请勿重复操作",
+                            }
+                        ),
+                    }
+                )
+
+        mission = module.NodeSeekDailyMission()
+
+        ok, detail = mission._browser_fetch_attendance(FakeBrowser())
+
+        self.assertTrue(ok, detail)
+        self.assertEqual(detail, "今天已完成签到，请勿重复操作")
+
+    def test_attendance_http_error_still_fails(self):
+        module = load_module(
+            "nodeseek_attendance_http_error_under_test",
+            NODESEEK_PATH,
+            stub_modules=build_nodeseek_stub_modules(),
+        )
+
+        class FakeBrowser:
+            def run_js(self, js_code):
+                return json.dumps(
+                    {
+                        "status": 500,
+                        "body": json.dumps(
+                            {"success": False, "message": "服务器开小差了"}
+                        ),
+                    }
+                )
+
+        mission = module.NodeSeekDailyMission()
+
+        ok, detail = mission._browser_fetch_attendance(FakeBrowser())
+
+        self.assertFalse(ok)
+        self.assertEqual(detail, "Browser attendance HTTP 500: 服务器开小差了")
+
     def test_looks_like_auth_failure_classification(self):
         module = load_module(
             "nodeseek_auth_failure_classification_under_test",

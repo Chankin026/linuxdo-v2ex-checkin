@@ -922,21 +922,24 @@ class NodeSeekDailyMission:
             data = {}
         message = str(data.get("message") or data.get("msg") or "").strip()
 
-        if status_code != 200:
-            return False, (
-                f"Browser attendance HTTP {status_code}: "
-                f"{message or body_text[:200]}"
-            )
-
         if data.get("success") is True:
             return True, message or "Attendance succeeded via browser"
 
+        # NodeSeek answers a repeated same-day attendance with HTTP 500 and
+        # "今天已完成签到，请勿重复操作". That is the goal already met, not a
+        # failure, so this has to be checked before the status code is judged.
         already_markers = [
             "今日已签到", "今日已领取", "今天已完成签到",
             "请勿重复操作", "已完成签到", "already", "claimed",
         ]
         if any(m.lower() in message.lower() for m in already_markers):
             return True, message or "Attendance already completed"
+
+        if status_code != 200:
+            return False, (
+                f"Browser attendance HTTP {status_code}: "
+                f"{message or body_text[:200]}"
+            )
 
         return False, message or f"Browser attendance failed: {body_text[:200]}"
 
