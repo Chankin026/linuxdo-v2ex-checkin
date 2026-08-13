@@ -23,6 +23,42 @@ NODESEEK_ATTENDANCE_API_URL = f"{NODESEEK_BASE_URL}/api/attendance"
 NODESEEK_CREDIT_PAGE_URL = f"{NODESEEK_BASE_URL}/api/account/credit/page-{{page}}"
 NODESEEK_TURNSTILE_SITEKEY = "0x4AAAAAAAaNy7leGjewpVyR"
 
+# Substrings that mean "this session is not authenticated" rather than
+# "the site is blocking us". Only the former justifies burning a captcha on a
+# fresh username/password login.
+NODESEEK_AUTH_FAILURE_MARKERS = (
+    "未登录",
+    "没有登录",
+    "请先登录",
+    "请登录",
+    "尚未登录",
+    "登录已过期",
+    "登录状态已失效",
+    "登录失效",
+    "登录超时",
+    "身份已过期",
+    "not logged in",
+    "not signed in",
+    "please log in",
+    "please login",
+    "please sign in",
+    "login required",
+    "login expired",
+    "unauthorized",
+    "unauthenticated",
+    "http 401",
+)
+
+# Substrings that mean Cloudflare / rate limiting is in the way. Retrying with a
+# password login would not help and only wastes captcha credit.
+NODESEEK_BLOCKED_MARKERS = (
+    "cloudflare",
+    "just a moment",
+    "challenge",
+    "too many requests",
+    "rate limit",
+)
+
 
 class NodeSeekDailyMission:
     def __init__(
@@ -611,6 +647,106 @@ class NodeSeekDailyMission:
             waited += 1
         return ""
 
+    @staticmethod
+    def _looks_like_auth_failure(detail: str) -> bool:
+        text = (detail or "").lower()
+        if not text:
+            return False
+        if any(marker in text for marker in NODESEEK_BLOCKED_MARKERS):
+            return False
+        return any(marker in text for marker in NODESEEK_AUTH_FAILURE_MARKERS)
+
+    @staticmethod
+    def _browser_probe_login_state(browser) -> Optional[bool]:
+        """Ask an auth-only endpoint whether the current session is still valid.
+
+        Returns True when logged in, False when the session is dead, and None
+        when the answer is inconclusive (Cloudflare, network error, odd body).
+        """
+        import json as _json
+
+        js_code = (
+            "return (async () => {"
+            "  const resp = await fetch('/api/account/credit/page-1', {"
+            "    method: 'GET',"
+            "    headers: { 'Accept': 'application/json, text/plain, */*' },"
+            "    credentials: 'include',"
+            "  });"
+            "  const text = await resp.text();"
+            "  return JSON.stringify({ status: resp.status, body: text.slice(0, 2000) });"
+            "})();"
+        )
+        try:
+            result_json = browser.run_js(js_code)
+        except Exception as e:
+            logger.debug(f"NodeSeek login-state probe failed: {e}")
+            return None
+        if not result_json:
+            return None
+
+        try:
+            result = _json.loads(result_json)
+        except Exception:
+            return None
+
+        status = result.get("status", 0)
+        body = str(result.get("body") or "")
+        lowered = body.lower()
+        if any(marker in lowered for marker in NODESEEK_BLOCKED_MARKERS):
+            return None
+        if status in {401, 403}:
+            return False
+        if status != 200:
+            return None
+
+        try:
+            data = _json.loads(body)
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        if data.get("success") is False:
+            return False
+        if data.get("success") is True or "credits" in data or "data" in data:
+            return True
+        return None
+
+    def _should_relogin_after_cookie_failure(self, browser, cookie_detail: str) -> bool:
+        if self._looks_like_auth_failure(cookie_detail):
+            logger.info(
+                "NodeSeek cookie failure looks like an expired session for "
+                f"{self.get_account_display_name()}"
+            )
+            return True
+
+        state = self._browser_probe_login_state(browser)
+        if state is False:
+            logger.info(
+                "NodeSeek login-state probe says the session is not "
+                f"authenticated for {self.get_account_display_name()}"
+            )
+            return True
+
+        logger.info(
+            "NodeSeek cookie failure is not an auth problem "
+            f"(probe={state}) for {self.get_account_display_name()}; "
+            "not spending a captcha on re-login"
+        )
+        return False
+
+    @staticmethod
+    def _clear_browser_cookies(browser) -> None:
+        for clear in (
+            lambda: browser.set.cookies.clear(),
+            lambda: browser.set.cookies.remove_all(),
+        ):
+            try:
+                clear()
+                return
+            except Exception:
+                continue
+        logger.debug("Unable to clear browser cookies before re-login")
+
     def _sync_browser_user_agent(self, browser) -> str:
         try:
             user_agent = str(
@@ -673,13 +809,31 @@ class NodeSeekDailyMission:
                         return True, detail
                     cookie_detail = detail
 
-            # Step 3: Use username/password only when no cookie path failed first.
+            # Step 3: Fall back to username/password when the cookie session is
+            # dead. A Cloudflare block or rate limit still fails fast, because
+            # logging in would not fix it and would waste captcha credit.
             if self.username and self.password:
-                if cookie_detail:
+                if cookie_detail and not self._should_relogin_after_cookie_failure(
+                    browser, cookie_detail
+                ):
                     return False, cookie_detail
+
+                if cookie_detail:
+                    logger.warning(
+                        "NodeSeek cookie session expired for "
+                        f"{self.get_account_display_name()}: {cookie_detail}; "
+                        "logging in again to refresh cookies"
+                    )
+                    self._clear_browser_cookies(browser)
+
                 ok, detail = self._browser_login(browser)
                 if not ok:
                     return False, detail
+
+                # Persist the refreshed session right away so that a later
+                # attendance failure does not throw away the new cookies.
+                self._save_browser_cookies(browser)
+
                 browser.get(f"{NODESEEK_BASE_URL}/board", timeout=30)
                 if not self._wait_for_cloudflare(browser):
                     return False, "Browser stuck on Cloudflare challenge after login"
@@ -690,6 +844,12 @@ class NodeSeekDailyMission:
                 return False, f"Login OK but attendance failed: {detail}"
 
             if cookie_detail:
+                if self._looks_like_auth_failure(cookie_detail):
+                    return False, (
+                        f"{cookie_detail} (cookie expired and no "
+                        "NODESEEK_USERNAME/NODESEEK_PASSWORD configured to "
+                        "refresh it automatically)"
+                    )
                 return False, cookie_detail
 
             return False, "No credentials or cookies configured"
@@ -727,11 +887,19 @@ class NodeSeekDailyMission:
         status_code = result.get("status", 0)
         body_text = result.get("body", "")
 
-        if status_code != 200:
-            return False, f"Browser attendance HTTP {status_code}: {body_text[:200]}"
-
-        data = _json.loads(body_text) if body_text else {}
+        try:
+            data = _json.loads(body_text) if body_text else {}
+        except ValueError:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
         message = str(data.get("message") or data.get("msg") or "").strip()
+
+        if status_code != 200:
+            return False, (
+                f"Browser attendance HTTP {status_code}: "
+                f"{message or body_text[:200]}"
+            )
 
         if data.get("success") is True:
             return True, message or "Attendance succeeded via browser"

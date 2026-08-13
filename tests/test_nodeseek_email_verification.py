@@ -494,6 +494,198 @@ class NodeSeekBrowserEmailVerificationTests(unittest.TestCase):
         mission._browser_login.assert_not_called()
         mission._browser_fetch_attendance.assert_not_called()
 
+    @staticmethod
+    def _build_fake_browser_class(probe_result=None):
+        class FakeCookieSetter:
+            def __init__(self, browser):
+                self.browser = browser
+
+            def cookies(self, cookies):
+                self.browser.events.append(("cookies", cookies))
+
+        class FakeBrowser:
+            title = "NodeSeek"
+            url = "https://www.nodeseek.com"
+
+            def __init__(self, *_args, **_kwargs):
+                self.events = []
+                self.set = FakeCookieSetter(self)
+
+            def get(self, url, timeout=30):
+                self.events.append(("get", url))
+                self.url = url
+
+            def run_js(self, js_code):
+                if "/api/account/credit/page-1" in js_code:
+                    if probe_result is None:
+                        raise AssertionError("login-state probe was not expected")
+                    return json.dumps(probe_result)
+                raise AssertionError(f"Unexpected JS: {js_code}")
+
+            def cookies(self):
+                return mock.Mock(as_str=mock.Mock(return_value="fresh=1"))
+
+            def quit(self):
+                self.events.append(("quit", None))
+
+        return FakeBrowser
+
+    @staticmethod
+    def _patched_drission(fake_browser):
+        chrome_options = mock.Mock()
+        chrome_options.auto_port.return_value = chrome_options
+        chrome_options.headless.return_value = chrome_options
+        chrome_options.incognito.return_value = chrome_options
+        chrome_options.set_argument.return_value = chrome_options
+        chrome_options.set_user_agent.return_value = chrome_options
+
+        drission_page = types.ModuleType("DrissionPage")
+        drission_page.ChromiumOptions = mock.Mock(return_value=chrome_options)
+        drission_page.ChromiumPage = mock.Mock(return_value=fake_browser)
+        return mock.patch.dict(sys.modules, {"DrissionPage": drission_page})
+
+    def test_expired_cookie_falls_back_to_password_login(self):
+        module = load_module(
+            "nodeseek_expired_cookie_relogin_under_test",
+            NODESEEK_PATH,
+            stub_modules=build_nodeseek_stub_modules(),
+        )
+
+        fake_browser = self._build_fake_browser_class()()
+        mission = module.NodeSeekDailyMission(
+            cookie_str="session=expired",
+            username="neal",
+            password="password",
+        )
+        mission._wait_for_cloudflare = mock.Mock(return_value=True)
+        mission._browser_login = mock.Mock(return_value=(True, "login ok"))
+        mission._browser_fetch_attendance = mock.Mock(
+            side_effect=[
+                (False, "Browser attendance HTTP 404: 未登录"),
+                (True, "签到成功"),
+            ]
+        )
+        mission._save_browser_cookies = mock.Mock()
+
+        with self._patched_drission(fake_browser):
+            ok, detail = mission._attendance_via_browser()
+
+        self.assertTrue(ok, detail)
+        self.assertEqual(detail, "签到成功")
+        mission._browser_login.assert_called_once()
+        # Cookies persisted right after login and again after attendance.
+        self.assertEqual(mission._save_browser_cookies.call_count, 2)
+
+    def test_login_persists_cookies_even_when_attendance_fails(self):
+        module = load_module(
+            "nodeseek_persist_cookie_after_login_under_test",
+            NODESEEK_PATH,
+            stub_modules=build_nodeseek_stub_modules(),
+        )
+
+        fake_browser = self._build_fake_browser_class()()
+        mission = module.NodeSeekDailyMission(
+            cookie_str="session=expired",
+            username="neal",
+            password="password",
+        )
+        mission._wait_for_cloudflare = mock.Mock(return_value=True)
+        mission._browser_login = mock.Mock(return_value=(True, "login ok"))
+        mission._browser_fetch_attendance = mock.Mock(
+            side_effect=[
+                (False, "请先登录"),
+                (False, "attendance server error"),
+            ]
+        )
+        mission._save_browser_cookies = mock.Mock()
+
+        with self._patched_drission(fake_browser):
+            ok, detail = mission._attendance_via_browser()
+
+        self.assertFalse(ok)
+        self.assertIn("attendance server error", detail)
+        mission._save_browser_cookies.assert_called_once()
+
+    def test_ambiguous_cookie_failure_relogins_when_probe_says_logged_out(self):
+        module = load_module(
+            "nodeseek_probe_logged_out_under_test",
+            NODESEEK_PATH,
+            stub_modules=build_nodeseek_stub_modules(),
+        )
+
+        fake_browser = self._build_fake_browser_class(
+            probe_result={"status": 403, "body": '{"success":false}'}
+        )()
+        mission = module.NodeSeekDailyMission(
+            cookie_str="session=expired",
+            username="neal",
+            password="password",
+        )
+        mission._wait_for_cloudflare = mock.Mock(return_value=True)
+        mission._browser_login = mock.Mock(return_value=(True, "login ok"))
+        mission._browser_fetch_attendance = mock.Mock(
+            side_effect=[
+                (False, "unexpected attendance payload"),
+                (True, "签到成功"),
+            ]
+        )
+        mission._save_browser_cookies = mock.Mock()
+
+        with self._patched_drission(fake_browser):
+            ok, detail = mission._attendance_via_browser()
+
+        self.assertTrue(ok, detail)
+        mission._browser_login.assert_called_once()
+
+    def test_ambiguous_cookie_failure_fails_fast_when_still_logged_in(self):
+        module = load_module(
+            "nodeseek_probe_logged_in_under_test",
+            NODESEEK_PATH,
+            stub_modules=build_nodeseek_stub_modules(),
+        )
+
+        fake_browser = self._build_fake_browser_class(
+            probe_result={"status": 200, "body": '{"success":true,"credits":[]}'}
+        )()
+        mission = module.NodeSeekDailyMission(
+            cookie_str="session=good",
+            username="neal",
+            password="password",
+        )
+        mission._wait_for_cloudflare = mock.Mock(return_value=True)
+        mission._browser_login = mock.Mock(return_value=(True, "login ok"))
+        mission._browser_fetch_attendance = mock.Mock(
+            return_value=(False, "unexpected attendance payload")
+        )
+        mission._save_browser_cookies = mock.Mock()
+
+        with self._patched_drission(fake_browser):
+            ok, detail = mission._attendance_via_browser()
+
+        self.assertFalse(ok)
+        self.assertEqual(detail, "unexpected attendance payload")
+        mission._browser_login.assert_not_called()
+
+    def test_looks_like_auth_failure_classification(self):
+        module = load_module(
+            "nodeseek_auth_failure_classification_under_test",
+            NODESEEK_PATH,
+            stub_modules=build_nodeseek_stub_modules(),
+        )
+
+        mission = module.NodeSeekDailyMission()
+
+        self.assertTrue(mission._looks_like_auth_failure("请先登录"))
+        self.assertTrue(mission._looks_like_auth_failure("Browser attendance HTTP 401: "))
+        self.assertTrue(mission._looks_like_auth_failure("Unauthorized"))
+        self.assertFalse(
+            mission._looks_like_auth_failure(
+                "Browser stuck on Cloudflare challenge with cookies"
+            )
+        )
+        self.assertFalse(mission._looks_like_auth_failure("Too many requests"))
+        self.assertFalse(mission._looks_like_auth_failure(""))
+
     def test_request_with_fallback_does_not_retry_challenge_response(self):
         module = load_module(
             "nodeseek_request_no_retry_under_test",
